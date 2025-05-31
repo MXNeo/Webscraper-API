@@ -7,12 +7,14 @@ from pydantic import BaseModel, HttpUrl
 from typing import Dict, Any, Optional
 import os
 import logging
+from pathlib import Path
 from dotenv import load_dotenv
 from scrapegraphai.graphs import SmartScraperGraph
 from newspaper import Article
 import asyncio
 import concurrent.futures
 import json
+import platform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Get the current directory using pathlib for cross-platform compatibility
+BASE_DIR = Path(__file__).parent.absolute()
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+
+# Log platform information for debugging
+logger.info(f"Running on {platform.system()} {platform.release()}")
+logger.info(f"Python version: {platform.python_version()}")
+logger.info(f"Base directory: {BASE_DIR}")
 
 # Configure thread pool for better concurrency
 MAX_THREAD_POOL_SIZE = int(os.getenv("MAX_THREAD_POOL_SIZE", "10"))
@@ -32,9 +44,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Setup templates and static files
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Setup templates and static files with cross-platform paths
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Add CORS middleware
 app.add_middleware(
@@ -161,7 +173,11 @@ async def web_scrape(
 # API Routes
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "platform": platform.system(),
+        "python_version": platform.python_version()
+    }
 
 @app.post("/api/scrape", response_model=ScrapeResponse)
 async def scrape_url(request: ScrapeRequest):
