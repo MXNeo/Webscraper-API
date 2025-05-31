@@ -55,10 +55,11 @@ git clone https://github.com/MXNeo/Webscraper-API.git
 cd Webscraper-API
 
 # Copy environment template
-cp env.example .env
-# Edit .env with your API keys
+cp env.example docker/.env
+# Edit docker/.env with your API keys
 
 # Start the service
+cd docker
 docker-compose up -d
 ```
 
@@ -70,7 +71,7 @@ git clone https://github.com/MXNeo/Webscraper-API.git
 cd Webscraper-API
 
 # Build the Docker image
-docker build -t webscraper-api .
+docker build -f docker/Dockerfile -t webscraper-api .
 
 # Run the container
 docker run -d -p 8000:8000 \
@@ -157,19 +158,7 @@ Both methods return identical JSON structure:
 
 ### Docker Compose Configuration
 
-```yaml
-version: '3.8'
-services:
-  webscraper-api:
-    image: neoexec/webscraper-api:latest
-    ports:
-      - "8000:8000"
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - UVICORN_WORKERS=2
-      - MAX_THREAD_POOL_SIZE=10
-    restart: unless-stopped
-```
+See [docker/README.md](docker/README.md) for detailed Docker deployment instructions.
 
 ## ☸️ Kubernetes Deployment
 
@@ -177,18 +166,19 @@ services:
 
 ```bash
 # Deploy basic version
-kubectl apply -f quick-deploy.yaml
+kubectl apply -f kubernetes/quick-deploy.yaml
 ```
 
 ### Production Deployment with Persistent Configuration
 
 ```bash
 # Deploy with persistent config and hot-reload
-kubectl apply -f k8s-persistent-config.yaml
-kubectl apply -f config-update-scripts.yaml
+kubectl apply -f kubernetes/k8s-persistent-config.yaml
+kubectl apply -f kubernetes/config-update-scripts.yaml
 ```
 
 For detailed Kubernetes deployment instructions, see:
+- [kubernetes/README.md](kubernetes/README.md)
 - [K3S Deployment Guide](K3S_DEPLOYMENT_GUIDE.md)
 - [Persistent Configuration Guide](PERSISTENT_CONFIG_GUIDE.md)
 
@@ -221,16 +211,22 @@ For detailed Kubernetes deployment instructions, see:
 ├── queue_manager.py           # Redis queue for high-load scenarios
 ├── database.py                # Database utilities
 ├── requirements.txt           # Python dependencies
-├── Dockerfile                 # Container build instructions
-├── docker-compose.yml         # Multi-service orchestration
+├── env.example                # Environment template
+├── docker/                    # Docker deployment files
+│   ├── Dockerfile            # Container build instructions
+│   ├── docker-compose.yml    # Multi-service orchestration
+│   └── README.md             # Docker deployment guide
+├── kubernetes/                # Kubernetes deployment files
+│   ├── quick-deploy.yaml     # Simple K8s deployment
+│   ├── k8s-deployment.yaml   # Production K8s deployment
+│   ├── k8s-persistent-config.yaml # Advanced K8s with PVC
+│   ├── config-update-scripts.yaml # Config management scripts
+│   └── README.md             # Kubernetes deployment guide
 ├── templates/                 # HTML templates
 │   └── index.html            # Web interface
 ├── static/                    # Static assets
 │   ├── script.js             # Frontend JavaScript
 │   └── style.css             # Styling
-├── k8s-deployment.yaml        # Basic Kubernetes deployment
-├── k8s-persistent-config.yaml # Advanced K8s with persistent config
-├── config-update-scripts.yaml # Configuration management scripts
 └── docs/                      # Documentation
     ├── K3S_DEPLOYMENT_GUIDE.md
     └── PERSISTENT_CONFIG_GUIDE.md
@@ -250,11 +246,11 @@ python test_api.py
 
 ```bash
 # Build with custom tag
-docker build -t my-webscraper-api:latest .
+docker build -f docker/Dockerfile -t my-webscraper-api:latest .
 
 # Build for multiple architectures
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t my-webscraper-api:latest .
+  -f docker/Dockerfile -t my-webscraper-api:latest .
 ```
 
 ## 🔒 Security
