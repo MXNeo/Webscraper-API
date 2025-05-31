@@ -1,0 +1,72 @@
+body {
+    background-color: #f8f9fa;
+}
+
+.card {
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    border: 1px solid rgba(0, 0, 0, 0.125);
+}
+
+.card-header {
+    background-color: #fff;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.125);
+}
+
+.nav-tabs .nav-link {
+    border: 1px solid transparent;
+    border-top-left-radius: 0.375rem;
+    border-top-right-radius: 0.375rem;
+}
+
+.nav-tabs .nav-link.active {
+    background-color: #fff;
+    border-color: #dee2e6 #dee2e6 #fff;
+}
+
+.tab-content > .tab-pane {
+    border: 1px solid #dee2e6;
+    border-top: none;
+    border-bottom-left-radius: 0.375rem;
+    border-bottom-right-radius: 0.375rem;
+}
+
+pre {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.875rem;
+    line-height: 1.4;
+}
+
+.text-break {
+    word-break: break-all;
+}
+
+.spinner-border-sm {
+    width: 1rem;
+    height: 1rem;
+}
+
+.badge {
+    font-size: 0.75em;
+}
+
+.form-text {
+    font-size: 0.875em;
+    color: #6c757d;
+}
+
+.alert {
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+}
+
+.btn-group .btn {
+    margin-right: 0;
+}
+
+.d-flex.gap-2 > * {
+    margin-right: 0.5rem;
+}
+
+.d-flex.gap-2 > *:last-child {
+    margin-right: 0;
+} 

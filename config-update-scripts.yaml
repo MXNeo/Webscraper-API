@@ -1,0 +1,209 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-update-scripts
+data:
+  update-api-key.sh: |
+    #!/bin/bash
+    # Update API key for a specific provider
+    # Usage: ./update-api-key.sh openai sk-your-new-api-key
+    
+    PROVIDER=${1:-openai}
+    API_KEY=${2}
+    CONFIG_FILE="/shared-config/config.json"
+    
+    if [ -z "$API_KEY" ]; then
+        echo "Usage: $0 <provider> <api_key>"
+        echo "Providers: openai, anthropic, azure, ollama"
+        exit 1
+    fi
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Config file not found: $CONFIG_FILE"
+        exit 1
+    fi
+    
+    # Create backup
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%s)"
+    
+    # Update API key using jq
+    jq --arg provider "$PROVIDER" --arg key "$API_KEY" \
+       '.llm_providers[$provider].api_key = $key | .last_updated = now | strftime("%Y-%m-%dT%H:%M:%SZ")' \
+       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    
+    echo "Updated $PROVIDER API key in $CONFIG_FILE"
+    echo "Backup saved as ${CONFIG_FILE}.backup.$(date +%s)"
+  
+  update-model.sh: |
+    #!/bin/bash
+    # Update model for a specific provider
+    # Usage: ./update-model.sh openai gpt-4o
+    
+    PROVIDER=${1:-openai}
+    MODEL=${2}
+    CONFIG_FILE="/shared-config/config.json"
+    
+    if [ -z "$MODEL" ]; then
+        echo "Usage: $0 <provider> <model>"
+        echo "Examples:"
+        echo "  $0 openai gpt-4o"
+        echo "  $0 anthropic claude-3-opus-20240229"
+        echo "  $0 ollama llama3"
+        exit 1
+    fi
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Config file not found: $CONFIG_FILE"
+        exit 1
+    fi
+    
+    # Create backup
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%s)"
+    
+    # Update model using jq
+    jq --arg provider "$PROVIDER" --arg model "$MODEL" \
+       '.llm_providers[$provider].model = $model | .last_updated = now | strftime("%Y-%m-%dT%H:%M:%SZ")' \
+       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    
+    echo "Updated $PROVIDER model to $MODEL in $CONFIG_FILE"
+  
+  update-proxy.sh: |
+    #!/bin/bash
+    # Update proxy settings
+    # Usage: ./update-proxy.sh http://proxy:8080 https://proxy:8080
+    
+    HTTP_PROXY=${1}
+    HTTPS_PROXY=${2:-$1}
+    CONFIG_FILE="/shared-config/config.json"
+    
+    if [ -z "$HTTP_PROXY" ]; then
+        echo "Usage: $0 <http_proxy> [https_proxy]"
+        echo "Example: $0 http://proxy.company.com:8080"
+        echo "To clear proxy: $0 ''"
+        exit 1
+    fi
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Config file not found: $CONFIG_FILE"
+        exit 1
+    fi
+    
+    # Create backup
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%s)"
+    
+    # Update proxy settings using jq
+    jq --arg http "$HTTP_PROXY" --arg https "$HTTPS_PROXY" \
+       '.proxy_settings.http_proxy = $http | .proxy_settings.https_proxy = $https | .last_updated = now | strftime("%Y-%m-%dT%H:%M:%SZ")' \
+       "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    
+    echo "Updated proxy settings in $CONFIG_FILE"
+    echo "HTTP Proxy: $HTTP_PROXY"
+    echo "HTTPS Proxy: $HTTPS_PROXY"
+  
+  view-config.sh: |
+    #!/bin/bash
+    # View current configuration
+    CONFIG_FILE="/shared-config/config.json"
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Config file not found: $CONFIG_FILE"
+        exit 1
+    fi
+    
+    echo "=== Current Configuration ==="
+    echo "File: $CONFIG_FILE"
+    echo "Last Updated: $(jq -r '.last_updated // "Unknown"' "$CONFIG_FILE")"
+    echo ""
+    
+    echo "=== LLM Providers ==="
+    jq -r '.llm_providers | to_entries[] | "\(.key): \(.value.model) (API Key: \(if .value.api_key != "" then "Set" else "Not Set" end))"' "$CONFIG_FILE"
+    echo ""
+    
+    echo "=== Proxy Settings ==="
+    jq -r '.proxy_settings | "HTTP: \(.http_proxy // "Not Set")\nHTTPS: \(.https_proxy // "Not Set")"' "$CONFIG_FILE"
+    echo ""
+    
+    echo "=== Scraping Settings ==="
+    jq -r '.scraping_settings | "Timeout: \(.timeout)s\nMax Retries: \(.max_retries)\nUser Agent: \(.user_agent)"' "$CONFIG_FILE"
+  
+  backup-config.sh: |
+    #!/bin/bash
+    # Create a backup of current configuration
+    CONFIG_FILE="/shared-config/config.json"
+    BACKUP_DIR="/shared-config/backups"
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Config file not found: $CONFIG_FILE"
+        exit 1
+    fi
+    
+    mkdir -p "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/config-backup-$(date +%Y%m%d-%H%M%S).json"
+    
+    cp "$CONFIG_FILE" "$BACKUP_FILE"
+    echo "Configuration backed up to: $BACKUP_FILE"
+    
+    # Keep only last 10 backups
+    ls -t "$BACKUP_DIR"/config-backup-*.json | tail -n +11 | xargs -r rm
+    echo "Cleaned up old backups (keeping last 10)"
+  
+  restore-config.sh: |
+    #!/bin/bash
+    # Restore configuration from backup
+    # Usage: ./restore-config.sh [backup-file]
+    
+    CONFIG_FILE="/shared-config/config.json"
+    BACKUP_DIR="/shared-config/backups"
+    BACKUP_FILE=${1}
+    
+    if [ -z "$BACKUP_FILE" ]; then
+        echo "Available backups:"
+        ls -la "$BACKUP_DIR"/config-backup-*.json 2>/dev/null || echo "No backups found"
+        echo ""
+        echo "Usage: $0 <backup-file>"
+        echo "Example: $0 $BACKUP_DIR/config-backup-20250131-120000.json"
+        exit 1
+    fi
+    
+    if [ ! -f "$BACKUP_FILE" ]; then
+        echo "Backup file not found: $BACKUP_FILE"
+        exit 1
+    fi
+    
+    # Create current backup before restore
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.pre-restore.$(date +%s)"
+    
+    # Restore from backup
+    cp "$BACKUP_FILE" "$CONFIG_FILE"
+    echo "Configuration restored from: $BACKUP_FILE"
+    echo "Previous config saved as: ${CONFIG_FILE}.pre-restore.$(date +%s)"
+---
+# Job template for running config update scripts
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: config-updater-job
+spec:
+  template:
+    spec:
+      containers:
+      - name: config-updater
+        image: alpine:3.18
+        command: ["/bin/sh"]
+        args: ["-c", "apk add --no-cache jq && chmod +x /scripts/* && /bin/sh"]
+        volumeMounts:
+        - name: config-storage
+          mountPath: /shared-config
+        - name: update-scripts
+          mountPath: /scripts
+        workingDir: /scripts
+      restartPolicy: Never
+      volumes:
+      - name: config-storage
+        persistentVolumeClaim:
+          claimName: webscraper-config-pvc
+      - name: update-scripts
+        configMap:
+          name: config-update-scripts
+          defaultMode: 0755
+  backoffLimit: 1 
