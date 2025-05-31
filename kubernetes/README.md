@@ -1,165 +1,112 @@
 # Kubernetes Deployment
 
-This directory contains Kubernetes manifests for deploying the WebScraper API in production environments, including K3s, K8s, and other Kubernetes distributions.
+This directory contains streamlined Kubernetes manifests for deploying the WebScraper API in production environments, optimized for K3s and other Kubernetes distributions.
 
 ## Files
 
 ### `quick-deploy.yaml`
-Simple, single-file Kubernetes deployment for quick testing:
+Simple, single-file Kubernetes deployment for quick testing and basic production use:
 - 2 replicas for basic load distribution
-- Basic resource limits
+- Basic resource limits and health checks
 - ClusterIP service and Ingress
-- Minimal configuration
+- Minimal configuration - no persistent storage
+- Perfect for testing and lightweight deployments
 
-### `k8s-deployment.yaml`
-Standard production deployment with:
-- 3 replicas for high availability
-- Resource requests and limits
-- Health checks (readiness and liveness probes)
-- Secrets management for API keys
-- Pod disruption budget
-- Ingress with timeout configurations
+### `k3s-webui-persistent.yaml`
+**Recommended for production** - Advanced K3s deployment with persistent storage:
+- **Persistent Volume Claims** for web UI configurations and database storage
+- **Web UI Configuration Persistence**: API keys, proxy settings, database connections
+- **Automatic Storage Initialization** with proper directory structure
+- **K3s Optimized**: Uses local-path storage class and Traefik ingress
+- **High Availability**: 2 replicas with shared configuration
+- **Production Ready**: Resource limits, health checks, graceful shutdown
 
-### `k8s-persistent-config.yaml`
-Advanced deployment with persistent configuration:
-- Persistent Volume Claim (PVC) for shared configuration
-- Init containers for configuration initialization
-- Hot-reload configuration without pod restarts
-- ConfigMap templates for default settings
-- Multi-pod shared configuration access
+### `K3S-WEBUI-PERSISTENT-GUIDE.md`
+Comprehensive deployment guide for the persistent configuration setup.
 
-### `config-update-scripts.yaml`
-Configuration management utilities:
-- Shell scripts for updating API keys, models, and proxy settings
-- Backup and restore functionality
-- Configuration validation tools
-- Job templates for running update operations
+## 🚀 Quick Start
 
-## Quick Start
-
-### Option 1: Simple Deployment
+### Option 1: Simple Deployment (Testing)
 
 ```bash
-# Deploy basic version
+# Deploy basic version without persistence
 kubectl apply -f quick-deploy.yaml
 
 # Check deployment
 kubectl get pods -l app=webscraper-api
 kubectl get svc webscraper-api-service
+
+# Access via port forward
+kubectl port-forward svc/webscraper-api-service 8000:80
 ```
 
-### Option 2: Production Deployment
+### Option 2: Production Deployment with Persistent Storage (Recommended)
 
 ```bash
-# Create secret for API keys
-kubectl create secret generic webscraper-secrets \
-  --from-literal=openai-api-key=sk-your-actual-api-key
+# Deploy with persistent web UI configurations
+kubectl apply -f k3s-webui-persistent.yaml
 
-# Deploy production version
-kubectl apply -f k8s-deployment.yaml
+# Check deployment status
+kubectl get pods,pvc,svc,ingress -l app=webscraper-api
 
-# Check status
-kubectl get deployment webscraper-api
-kubectl get pods -l app=webscraper-api
+# Verify storage initialization
+kubectl logs job/webscraper-storage-init
+
+# Access web interface
+kubectl port-forward svc/webscraper-api-service 8000:80
 ```
 
-### Option 3: Persistent Configuration Deployment
+## 🎯 Which Deployment to Choose?
 
+### Use `quick-deploy.yaml` when:
+- ✅ **Testing** the application quickly
+- ✅ **Temporary deployments** that don't need persistence
+- ✅ **CI/CD pipelines** for testing
+- ✅ **Minimal resource** environments
+- ❌ You don't mind reconfiguring API keys after restarts
+
+### Use `k3s-webui-persistent.yaml` when:
+- ✅ **Production deployments** where configuration persistence is critical
+- ✅ **Web UI configuration** via the interface (API keys, proxy settings)
+- ✅ **Database connections** for proxy rotation
+- ✅ **Long-term deployments** that need to survive restarts
+- ✅ **Team environments** where multiple users configure the system
+
+## 📁 Persistent Storage Features (k3s-webui-persistent.yaml)
+
+### What Gets Persisted:
+- **API Keys**: OpenAI, Anthropic, Azure, Ollama keys configured via web interface
+- **Proxy Settings**: HTTP proxy and PostgreSQL database connections
+- **Database Connections**: Proxy table rotation settings
+- **Application Settings**: Web UI preferences and configurations
+- **Logs and Data**: Application logs and runtime data
+
+### Storage Structure:
+```
+/app/persistent-config/
+├── api-keys/keys.json         # API keys from web UI
+├── proxy-settings/proxy.json  # Proxy and database settings
+├── app-settings/config.json   # Web UI preferences
+└── backups/                   # Automatic backups
+
+/app/persistent-database/
+├── sqlite/                    # Local database files
+├── proxy-tables/              # Proxy rotation data
+└── logs/                      # Application logs
+```
+
+## 🌐 Access and Networking
+
+### Local Development
 ```bash
-# Deploy with persistent config
-kubectl apply -f k8s-persistent-config.yaml
+# Port forward to access locally
+kubectl port-forward svc/webscraper-api-service 8000:80
 
-# Deploy config management scripts
-kubectl apply -f config-update-scripts.yaml
-
-# Verify PVC is bound
-kubectl get pvc webscraper-config-pvc
+# Access at: http://localhost:8000
 ```
 
-## Configuration Management
-
-### Using Persistent Configuration
-
-#### Update API Key
-```bash
-kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: update-openai-key-$(date +%s)
-spec:
-  template:
-    spec:
-      containers:
-      - name: config-updater
-        image: alpine:3.18
-        command: ["/bin/sh", "-c"]
-        args:
-        - |
-          apk add --no-cache jq
-          /scripts/update-api-key.sh openai sk-your-new-openai-api-key
-        volumeMounts:
-        - name: config-storage
-          mountPath: /shared-config
-        - name: update-scripts
-          mountPath: /scripts
-      restartPolicy: Never
-      volumes:
-      - name: config-storage
-        persistentVolumeClaim:
-          claimName: webscraper-config-pvc
-      - name: update-scripts
-        configMap:
-          name: config-update-scripts
-          defaultMode: 0755
-  backoffLimit: 1
-EOF
-```
-
-#### View Current Configuration
-```bash
-kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: view-config-$(date +%s)
-spec:
-  template:
-    spec:
-      containers:
-      - name: config-viewer
-        image: alpine:3.18
-        command: ["/bin/sh", "-c"]
-        args:
-        - |
-          apk add --no-cache jq
-          /scripts/view-config.sh
-        volumeMounts:
-        - name: config-storage
-          mountPath: /shared-config
-        - name: update-scripts
-          mountPath: /scripts
-      restartPolicy: Never
-      volumes:
-      - name: config-storage
-        persistentVolumeClaim:
-          claimName: webscraper-config-pvc
-      - name: update-scripts
-        configMap:
-          name: config-update-scripts
-          defaultMode: 0755
-  backoffLimit: 1
-EOF
-
-# View the output
-kubectl logs job/view-config-$(date +%s)
-```
-
-## Access and Networking
-
-### Ingress Configuration
-
-Update the host in your chosen deployment file:
+### Production Access
+Edit the ingress host in your chosen deployment file:
 
 ```yaml
 spec:
@@ -176,53 +123,46 @@ spec:
               number: 80
 ```
 
-### Port Forwarding (for testing)
+## 🔧 Common Operations
 
+### Scaling
 ```bash
-# Forward local port to service
-kubectl port-forward svc/webscraper-api-service 8000:80
+# Scale to more replicas
+kubectl scale deployment webscraper-api --replicas=3
 
-# Access at http://localhost:8000
+# Check status
+kubectl get pods -l app=webscraper-api
 ```
 
-## Scaling and Performance
-
-### Manual Scaling
-
+### Monitoring
 ```bash
-# Scale to 5 replicas
-kubectl scale deployment webscraper-api --replicas=5
+# View logs
+kubectl logs -l app=webscraper-api -f
 
-# Check scaling status
-kubectl get deployment webscraper-api
-```
-
-### Resource Monitoring
-
-```bash
 # Check resource usage
 kubectl top pods -l app=webscraper-api
-kubectl top nodes
 
-# Check pod status
-kubectl describe pods -l app=webscraper-api
+# Check storage (persistent deployment only)
+kubectl get pvc
+kubectl exec deployment/webscraper-api -- df -h /app/persistent-config
 ```
 
-## Troubleshooting
+### Configuration Management (Persistent Deployment Only)
+```bash
+# View current API keys
+kubectl exec deployment/webscraper-api -- cat /app/persistent-config/api-keys/keys.json
+
+# View proxy settings
+kubectl exec deployment/webscraper-api -- cat /app/persistent-config/proxy-settings/proxy.json
+
+# Create configuration backup
+kubectl exec deployment/webscraper-api -- tar -czf /tmp/config-backup.tar.gz /app/persistent-config
+kubectl cp webscraper-api-<pod-name>:/tmp/config-backup.tar.gz ./config-backup.tar.gz
+```
+
+## 🛠️ Troubleshooting
 
 ### Common Issues
-
-#### PVC Not Binding (for persistent config)
-```bash
-# Check storage class
-kubectl get storageclass
-
-# Check PVC status
-kubectl describe pvc webscraper-config-pvc
-
-# For K3s, ensure local-path provisioner is running
-kubectl get pods -n kube-system | grep local-path
-```
 
 #### Pods Not Starting
 ```bash
@@ -236,73 +176,67 @@ kubectl get events --sort-by=.metadata.creationTimestamp
 kubectl describe deployment webscraper-api
 ```
 
-#### Configuration Issues
+#### PVC Not Binding (Persistent Deployment)
 ```bash
-# Check config initialization (persistent config only)
-kubectl logs -l app=webscraper-api -c config-init
+# Check if local-path provisioner is running (K3s)
+kubectl get pods -n kube-system | grep local-path
 
-# Check secrets
-kubectl get secrets webscraper-secrets -o yaml
+# Check storage class
+kubectl get storageclass
 
-# Verify config file exists (persistent config only)
-kubectl exec deployment/webscraper-api -- ls -la /shared-config/
+# Install local-path provisioner if missing:
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.24/deploy/local-path-storage.yaml
 ```
 
-### Recovery Procedures
-
-#### Restart Deployment
+#### Web Interface Not Accessible
 ```bash
+# Check service endpoints
+kubectl get endpoints webscraper-api-service
+
+# Test internal connectivity
+kubectl exec deployment/webscraper-api -- curl -f http://localhost:8000/api/health
+
+# Check ingress status
+kubectl describe ingress webscraper-api-ingress
+```
+
+## 📋 Quick Reference
+
+### Essential Commands
+```bash
+# Deploy (choose one)
+kubectl apply -f quick-deploy.yaml                    # Simple
+kubectl apply -f k3s-webui-persistent.yaml           # Production
+
+# Check status
+kubectl get pods,svc,ingress -l app=webscraper-api
+
+# Access web interface
+kubectl port-forward svc/webscraper-api-service 8000:80
+
+# View logs
+kubectl logs -l app=webscraper-api -f
+
+# Scale
+kubectl scale deployment webscraper-api --replicas=3
+
+# Restart
 kubectl rollout restart deployment/webscraper-api
+
+# Delete
+kubectl delete -f <deployment-file>
 ```
 
-#### Reset Configuration (persistent config only)
-```bash
-# Delete config to trigger re-initialization
-kubectl exec deployment/webscraper-api -- rm /shared-config/config.json
+### Configuration Paths (Persistent Deployment)
+- **API Keys**: `/app/persistent-config/api-keys/keys.json`
+- **Proxy Settings**: `/app/persistent-config/proxy-settings/proxy.json`
+- **App Settings**: `/app/persistent-config/app-settings/config.json`
+- **Database**: `/app/persistent-database/`
 
-# Restart pods
-kubectl rollout restart deployment/webscraper-api
-```
+## 📚 Documentation
 
-## Performance Tuning
-
-### Resource Limits
-
-Adjust based on your workload:
-
-```yaml
-resources:
-  requests:
-    memory: "512Mi"    # Minimum memory
-    cpu: "250m"        # Minimum CPU (0.25 cores)
-  limits:
-    memory: "2Gi"      # Maximum memory
-    cpu: "1000m"       # Maximum CPU (1 core)
-```
-
-### Concurrency Settings
-
-Configure via environment variables:
-
-```yaml
-env:
-- name: UVICORN_WORKERS
-  value: "2"           # Workers per pod
-- name: MAX_THREAD_POOL_SIZE
-  value: "10"          # Threads per worker
-```
-
-## Documentation
-
-For detailed guides, see:
-- [K3S Deployment Guide](../K3S_DEPLOYMENT_GUIDE.md)
-- [Persistent Configuration Guide](../PERSISTENT_CONFIG_GUIDE.md)
+For detailed setup instructions for the persistent deployment, see:
+- [K3S WebUI Persistent Guide](K3S-WEBUI-PERSISTENT-GUIDE.md)
 - [Main README](../README.md)
 
-## Capacity Planning
-
-| Configuration | Concurrent Requests | Resource Requirements |
-|---------------|-------------------|---------------------|
-| **Light** | ~10 requests | 1 pod, 512Mi RAM, 0.25 CPU |
-| **Medium** | ~20 requests | 2 pods, 1Gi RAM, 0.5 CPU each |
-| **High** | ~30+ requests | 3+ pods, 2Gi RAM, 1 CPU each | 
+Choose the deployment that best fits your needs - simple for testing, persistent for production! 🚀 
