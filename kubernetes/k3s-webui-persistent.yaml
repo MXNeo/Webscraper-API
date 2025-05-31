@@ -1,0 +1,316 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: webscraper-webui-config-pvc
+  labels:
+    app: webscraper-api
+spec:
+  accessModes:
+    - ReadWriteOnce  # K3s local-path supports RWO
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: local-path  # K3s default storage class
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: webscraper-database-pvc
+  labels:
+    app: webscraper-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webscraper-api
+  labels:
+    app: webscraper-api
+spec:
+  replicas: 2  # Multiple replicas for availability
+  selector:
+    matchLabels:
+      app: webscraper-api
+  template:
+    metadata:
+      labels:
+        app: webscraper-api
+    spec:
+      containers:
+      - name: webscraper-api
+        image: neoexec/webscraper-api:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: UVICORN_WORKERS
+          value: "1"  # Single worker per pod since we have multiple replicas
+        - name: MAX_THREAD_POOL_SIZE
+          value: "10"
+        # Web UI will store configs in these paths
+        - name: WEBSCRAPER_CONFIG_DIR
+          value: "/app/persistent-config"
+        - name: WEBSCRAPER_DATABASE_DIR
+          value: "/app/persistent-database"
+        volumeMounts:
+        # Mount for web UI configurations (API keys, settings)
+        - name: webui-config-storage
+          mountPath: /app/persistent-config
+        # Mount for database files (proxy tables, etc.)
+        - name: database-storage
+          mountPath: /app/persistent-database
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        # Graceful shutdown
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15"]
+      volumes:
+      - name: webui-config-storage
+        persistentVolumeClaim:
+          claimName: webscraper-webui-config-pvc
+      - name: database-storage
+        persistentVolumeClaim:
+          claimName: webscraper-database-pvc
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webscraper-api-service
+  labels:
+    app: webscraper-api
+spec:
+  selector:
+    app: webscraper-api
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: webscraper-api-ingress
+  labels:
+    app: webscraper-api
+  annotations:
+    # K3s Traefik annotations
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: default-webscraper-timeout@kubernetescrd
+    # Increase timeout for long scraping operations
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+spec:
+  rules:
+  - host: webscraper.local  # Change to your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: webscraper-api-service
+            port:
+              number: 80
+---
+# Traefik Middleware for timeout (K3s specific)
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: webscraper-timeout
+spec:
+  forwardAuth:
+    address: http://webscraper-api-service/
+    authResponseHeaders:
+      - X-Forwarded-User
+  # Increase timeout for scraping operations
+  buffering:
+    maxRequestBodyBytes: 10485760  # 10MB
+    memRequestBodyBytes: 2097152   # 2MB
+---
+# ConfigMap for initialization script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webscraper-init-script
+  labels:
+    app: webscraper-api
+data:
+  init-storage.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Initializing WebScraper API persistent storage..."
+    
+    # Create config directory structure
+    mkdir -p /app/persistent-config/api-keys
+    mkdir -p /app/persistent-config/llm-configs
+    mkdir -p /app/persistent-config/proxy-settings
+    mkdir -p /app/persistent-config/app-settings
+    mkdir -p /app/persistent-config/backups
+    
+    # Create database directory structure
+    mkdir -p /app/persistent-database/sqlite
+    mkdir -p /app/persistent-database/proxy-tables
+    mkdir -p /app/persistent-database/logs
+    
+    # Set proper permissions
+    chmod -R 755 /app/persistent-config
+    chmod -R 755 /app/persistent-database
+    
+    # Create default config files if they don't exist
+    if [ ! -f /app/persistent-config/app-settings/config.json ]; then
+        echo "Creating default configuration..."
+        cat > /app/persistent-config/app-settings/config.json << 'EOF'
+    {
+      "version": "1.0",
+      "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+      "web_ui_settings": {
+        "theme": "light",
+        "auto_save": true,
+        "default_scraping_method": "newspaper"
+      },
+      "api_settings": {
+        "rate_limiting": false,
+        "max_concurrent_requests": 10,
+        "request_timeout": 300
+      }
+    }
+    EOF
+    fi
+    
+    # Create API keys storage file if it doesn't exist
+    if [ ! -f /app/persistent-config/api-keys/keys.json ]; then
+        echo "Creating API keys storage..."
+        cat > /app/persistent-config/api-keys/keys.json << 'EOF'
+    {
+      "openai": {
+        "api_key": "",
+        "model": "gpt-4o-mini",
+        "base_url": "https://api.openai.com/v1",
+        "last_updated": ""
+      },
+      "anthropic": {
+        "api_key": "",
+        "model": "claude-3-haiku-20240307",
+        "base_url": "https://api.anthropic.com",
+        "last_updated": ""
+      },
+      "ollama": {
+        "api_key": "",
+        "model": "llama3",
+        "base_url": "http://localhost:11434",
+        "last_updated": ""
+      },
+      "azure": {
+        "api_key": "",
+        "model": "gpt-4",
+        "base_url": "",
+        "api_version": "2024-02-15-preview",
+        "last_updated": ""
+      }
+    }
+    EOF
+    fi
+    
+    # Create proxy settings file if it doesn't exist
+    if [ ! -f /app/persistent-config/proxy-settings/proxy.json ]; then
+        echo "Creating proxy settings storage..."
+        cat > /app/persistent-config/proxy-settings/proxy.json << 'EOF'
+    {
+      "database_connection": {
+        "host": "",
+        "port": 5432,
+        "database": "",
+        "username": "",
+        "password": "",
+        "table": "proxies",
+        "enabled": false,
+        "last_updated": ""
+      },
+      "http_proxy": {
+        "enabled": false,
+        "host": "",
+        "port": "",
+        "username": "",
+        "password": ""
+      },
+      "proxy_rotation": {
+        "enabled": false,
+        "rotation_interval": 300,
+        "max_retries": 3
+      }
+    }
+    EOF
+    fi
+    
+    echo "Storage initialization completed successfully!"
+    ls -la /app/persistent-config/
+    ls -la /app/persistent-database/
+---
+# Init Job to set up storage structure
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: webscraper-storage-init
+  labels:
+    app: webscraper-api
+spec:
+  template:
+    spec:
+      containers:
+      - name: storage-init
+        image: busybox:1.35
+        command: ["/bin/sh"]
+        args: ["/scripts/init-storage.sh"]
+        volumeMounts:
+        - name: webui-config-storage
+          mountPath: /app/persistent-config
+        - name: database-storage
+          mountPath: /app/persistent-database
+        - name: init-script
+          mountPath: /scripts
+      restartPolicy: OnFailure
+      volumes:
+      - name: webui-config-storage
+        persistentVolumeClaim:
+          claimName: webscraper-webui-config-pvc
+      - name: database-storage
+        persistentVolumeClaim:
+          claimName: webscraper-database-pvc
+      - name: init-script
+        configMap:
+          name: webscraper-init-script
+          defaultMode: 0755
+  backoffLimit: 3 

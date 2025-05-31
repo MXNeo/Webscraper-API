@@ -24,8 +24,8 @@ A powerful, production-ready web scraping API that combines **Newspaper4k** and 
 - **Web Interface**: User-friendly configuration and testing dashboard
 - **Health Checks**: Built-in monitoring endpoints
 - **Standardized API**: Consistent response format across all methods
+- **Persistent Configuration**: Kubernetes PVC support for web UI settings
 - **Hot Configuration Reload**: Update settings without restarts
-- **Persistent Configuration**: Kubernetes PVC support for shared config
 
 ### 🐳 Deployment Options
 - **Docker**: Single container deployment
@@ -162,25 +162,32 @@ See [docker/README.md](docker/README.md) for detailed Docker deployment instruct
 
 ## ☸️ Kubernetes Deployment
 
-### Simple Deployment
+### Simple Deployment (Testing)
 
 ```bash
-# Deploy basic version
+# Deploy basic version without persistence
 kubectl apply -f kubernetes/quick-deploy.yaml
+
+# Access via port forward
+kubectl port-forward svc/webscraper-api-service 8000:80
 ```
 
 ### Production Deployment with Persistent Configuration
 
 ```bash
-# Deploy with persistent config and hot-reload
-kubectl apply -f kubernetes/k8s-persistent-config.yaml
-kubectl apply -f kubernetes/config-update-scripts.yaml
+# Deploy with persistent web UI configurations
+kubectl apply -f kubernetes/k3s-webui-persistent.yaml
+
+# Check deployment status
+kubectl get pods,pvc,svc,ingress -l app=webscraper-api
+
+# Access web interface
+kubectl port-forward svc/webscraper-api-service 8000:80
 ```
 
 For detailed Kubernetes deployment instructions, see:
-- [kubernetes/README.md](kubernetes/README.md)
-- [K3S Deployment Guide](K3S_DEPLOYMENT_GUIDE.md)
-- [Persistent Configuration Guide](PERSISTENT_CONFIG_GUIDE.md)
+- [kubernetes/README.md](kubernetes/README.md) - Complete deployment guide
+- [kubernetes/K3S-WEBUI-PERSISTENT-GUIDE.md](kubernetes/K3S-WEBUI-PERSISTENT-GUIDE.md) - Persistent storage setup
 
 ## 📊 Performance
 
@@ -207,8 +214,6 @@ For detailed Kubernetes deployment instructions, see:
 ```
 ├── main.py                    # FastAPI application
 ├── config.py                  # Configuration management
-├── config_manager.py          # Persistent config with hot-reload
-├── queue_manager.py           # Redis queue for high-load scenarios
 ├── database.py                # Database utilities
 ├── requirements.txt           # Python dependencies
 ├── env.example                # Environment template
@@ -218,28 +223,14 @@ For detailed Kubernetes deployment instructions, see:
 │   └── README.md             # Docker deployment guide
 ├── kubernetes/                # Kubernetes deployment files
 │   ├── quick-deploy.yaml     # Simple K8s deployment
-│   ├── k8s-deployment.yaml   # Production K8s deployment
-│   ├── k8s-persistent-config.yaml # Advanced K8s with PVC
-│   ├── config-update-scripts.yaml # Config management scripts
+│   ├── k3s-webui-persistent.yaml # Production K8s with persistent storage
+│   ├── K3S-WEBUI-PERSISTENT-GUIDE.md # Detailed setup guide
 │   └── README.md             # Kubernetes deployment guide
 ├── templates/                 # HTML templates
 │   └── index.html            # Web interface
-├── static/                    # Static assets
-│   ├── script.js             # Frontend JavaScript
-│   └── style.css             # Styling
-└── docs/                      # Documentation
-    ├── K3S_DEPLOYMENT_GUIDE.md
-    └── PERSISTENT_CONFIG_GUIDE.md
-```
-
-### Running Tests
-
-```bash
-# Install test dependencies
-pip install pytest requests
-
-# Run API tests
-python test_api.py
+└── static/                    # Static assets
+    ├── script.js             # Frontend JavaScript
+    └── style.css             # Styling
 ```
 
 ### Building Custom Images
@@ -289,7 +280,7 @@ docker run -m 2g neoexec/webscraper-api:latest
 
 - **Issues**: [GitHub Issues](https://github.com/MXNeo/Webscraper-API/issues)
 - **Documentation**: See `/docs` endpoint when running
-- **Examples**: Check `example_usage.sh` for usage examples
+- **Docker Hub**: [neoexec/webscraper-api](https://hub.docker.com/r/neoexec/webscraper-api)
 
 ## 📄 License
 
