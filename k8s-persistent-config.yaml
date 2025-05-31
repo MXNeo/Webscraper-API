@@ -1,0 +1,198 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: webscraper-config-pvc
+spec:
+  accessModes:
+    - ReadWriteMany  # Multiple pods can read/write
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path  # Adjust for your K3s storage class
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webscraper-config-template
+data:
+  config.json: |
+    {
+      "llm_providers": {
+        "openai": {
+          "api_key": "",
+          "model": "gpt-4o-mini",
+          "base_url": "https://api.openai.com/v1"
+        },
+        "anthropic": {
+          "api_key": "",
+          "model": "claude-3-haiku-20240307",
+          "base_url": "https://api.anthropic.com"
+        },
+        "ollama": {
+          "api_key": "",
+          "model": "llama3",
+          "base_url": "http://localhost:11434"
+        },
+        "azure": {
+          "api_key": "",
+          "model": "gpt-4",
+          "base_url": "",
+          "api_version": "2024-02-15-preview"
+        }
+      },
+      "proxy_settings": {
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "localhost,127.0.0.1"
+      },
+      "scraping_settings": {
+        "timeout": 30,
+        "max_retries": 3,
+        "user_agent": "WebScraper-API/1.0"
+      },
+      "last_updated": "2025-01-31T00:00:00Z"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webscraper-api
+  labels:
+    app: webscraper-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: webscraper-api
+  template:
+    metadata:
+      labels:
+        app: webscraper-api
+    spec:
+      initContainers:
+      # Initialize config if it doesn't exist
+      - name: config-init
+        image: busybox:1.35
+        command: ['sh', '-c']
+        args:
+        - |
+          if [ ! -f /shared-config/config.json ]; then
+            echo "Initializing config from template..."
+            cp /config-template/config.json /shared-config/config.json
+            chmod 666 /shared-config/config.json
+          else
+            echo "Config already exists, skipping initialization"
+          fi
+        volumeMounts:
+        - name: config-storage
+          mountPath: /shared-config
+        - name: config-template
+          mountPath: /config-template
+      containers:
+      - name: webscraper-api
+        image: neoexec/webscraper-api:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: UVICORN_WORKERS
+          value: "2"
+        - name: MAX_THREAD_POOL_SIZE
+          value: "10"
+        - name: CONFIG_FILE_PATH
+          value: "/shared-config/config.json"
+        - name: WATCH_CONFIG_CHANGES
+          value: "true"
+        volumeMounts:
+        - name: config-storage
+          mountPath: /shared-config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+      volumes:
+      - name: config-storage
+        persistentVolumeClaim:
+          claimName: webscraper-config-pvc
+      - name: config-template
+        configMap:
+          name: webscraper-config-template
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webscraper-api-service
+spec:
+  selector:
+    app: webscraper-api
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: webscraper-api-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  rules:
+  - host: webscraper.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: webscraper-api-service
+            port:
+              number: 80
+---
+# Job for updating configuration
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: update-webscraper-config
+  labels:
+    app: webscraper-config-updater
+spec:
+  template:
+    spec:
+      containers:
+      - name: config-updater
+        image: busybox:1.35
+        command: ['sh', '-c']
+        args:
+        - |
+          echo "Config update job - modify /shared-config/config.json as needed"
+          echo "Current config:"
+          cat /shared-config/config.json
+          echo "Job completed - config is ready for manual updates"
+        volumeMounts:
+        - name: config-storage
+          mountPath: /shared-config
+      restartPolicy: Never
+      volumes:
+      - name: config-storage
+        persistentVolumeClaim:
+          claimName: webscraper-config-pvc
+  backoffLimit: 1 
