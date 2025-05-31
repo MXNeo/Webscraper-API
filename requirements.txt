@@ -9,6 +9,7 @@ python-dotenv>=1.0.0
 jinja2>=3.1.2
 python-multipart>=0.0.6
 httpx>=0.25.0
+psycopg2-binary>=2.9.0
 
 # Cross-platform compatibility
 pathlib2>=2.3.7; python_version < "3.4"

@@ -20,16 +20,32 @@
                     </div>
                     <div class="card-body">
                         <div class="row">
-                            <div class="col-md-6">
-                                <div class="d-flex align-items-center">
+                            <div class="col-md-4">
+                                <div class="d-flex align-items-center mb-2">
                                     <span id="scrapegraph-status" class="badge bg-warning me-2">Not Configured</span>
                                     <strong>ScrapeGraph AI</strong>
                                 </div>
                             </div>
-                            <div class="col-md-6">
-                                <div class="d-flex align-items-center">
+                            <div class="col-md-4">
+                                <div class="d-flex align-items-center mb-2">
                                     <span id="database-status" class="badge bg-warning me-2">Not Configured</span>
                                     <strong>Database</strong>
+                                </div>
+                                <div id="database-details" class="small text-muted" style="display: none;"></div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="d-flex align-items-center mb-2">
+                                    <span id="proxy-status" class="badge bg-secondary me-2">Disabled</span>
+                                    <strong>Proxy Usage</strong>
+                                </div>
+                                <div id="proxy-details" class="small text-muted" style="display: none;"></div>
+                                <div id="proxy-controls" class="mt-2" style="display: none;">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="proxy-toggle">
+                                        <label class="form-check-label" for="proxy-toggle">
+                                            Enable Proxy Usage
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -50,6 +66,14 @@
                             <div class="mb-3">
                                 <label for="url" class="form-label">URL to Scrape</label>
                                 <input type="url" class="form-control" id="url" placeholder="https://example.com/article" required>
+                            </div>
+                            <div class="mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="use-proxy-test">
+                                    <label class="form-check-label" for="use-proxy-test">
+                                        Use proxy for this request (if available)
+                                    </label>
+                                </div>
                             </div>
                             <div class="mb-3">
                                 <div class="btn-group" role="group">
@@ -86,6 +110,11 @@
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" id="database-tab" data-bs-toggle="tab" data-bs-target="#database" type="button" role="tab">
                             Database Config
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="proxy-tab" data-bs-toggle="tab" data-bs-target="#proxy" type="button" role="tab">
+                            Proxy Management
                         </button>
                     </li>
                 </ul>
@@ -194,29 +223,97 @@
                     <div class="tab-pane fade" id="database" role="tabpanel">
                         <div class="card">
                             <div class="card-body">
+                                <div class="alert alert-info">
+                                    <h6>Database Requirements for Proxy Support</h6>
+                                    <p class="mb-2">Your PostgreSQL database should have a <code>proxies</code> table with the following structure:</p>
+                                    <ul class="mb-0">
+                                        <li><code>id</code> - Primary key (integer)</li>
+                                        <li><code>address</code> - Proxy IP address (varchar)</li>
+                                        <li><code>port</code> - Proxy port (integer)</li>
+                                        <li><code>error_count</code> - Number of failed attempts (integer, default 0)</li>
+                                        <li><code>status</code> - 'active' or 'inactive' (varchar)</li>
+                                        <li><code>username</code> - Proxy username (varchar, optional)</li>
+                                        <li><code>password</code> - Proxy password (varchar, optional)</li>
+                                        <li><code>type</code> - 'http' or 'https' (varchar)</li>
+                                        <li><code>last_used</code> - Last usage timestamp (timestamp, optional)</li>
+                                    </ul>
+                                    <p class="mt-2 mb-0"><strong>Note:</strong> Only proxies with <code>status='active'</code> and <code>error_count < 5</code> will be used.</p>
+                                </div>
+                                
                                 <form id="database-config-form">
-                                    <div class="mb-3">
-                                        <label for="db-host" class="form-label">Host</label>
-                                        <input type="text" class="form-control" id="db-host" placeholder="localhost" required>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="db-host" class="form-label">Host</label>
+                                                <input type="text" class="form-control" id="db-host" placeholder="localhost" required>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="db-port" class="form-label">Port</label>
+                                                <input type="number" class="form-control" id="db-port" placeholder="5432" value="5432" required>
+                                            </div>
+                                        </div>
                                     </div>
                                     <div class="mb-3">
                                         <label for="db-name" class="form-label">Database Name</label>
                                         <input type="text" class="form-control" id="db-name" placeholder="scraper_db" required>
                                     </div>
-                                    <div class="mb-3">
-                                        <label for="db-table" class="form-label">Proxies Table Name</label>
-                                        <input type="text" class="form-control" id="db-table" placeholder="proxies" required>
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="db-username" class="form-label">Username</label>
+                                                <input type="text" class="form-control" id="db-username" placeholder="postgres" required>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <div class="mb-3">
+                                                <label for="db-password" class="form-label">Password</label>
+                                                <input type="password" class="form-control" id="db-password" required>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="mb-3">
-                                        <label for="db-username" class="form-label">Username</label>
-                                        <input type="text" class="form-control" id="db-username" placeholder="postgres" required>
+                                    <div class="d-flex gap-2">
+                                        <button type="submit" class="btn btn-primary">Save & Test Database</button>
+                                        <button type="button" class="btn btn-outline-secondary" onclick="testDatabaseConnection()">Test Connection</button>
+                                        <button type="button" class="btn btn-danger" onclick="deleteDatabaseConfig()">Delete Configuration</button>
                                     </div>
-                                    <div class="mb-3">
-                                        <label for="db-password" class="form-label">Password</label>
-                                        <input type="password" class="form-control" id="db-password" required>
-                                    </div>
-                                    <button type="submit" class="btn btn-primary">Save Database Configuration</button>
                                 </form>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Proxy Management -->
+                    <div class="tab-pane fade" id="proxy" role="tabpanel">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6>Proxy Management & Testing</h6>
+                                <p class="text-muted">Test your database connection and proxy configuration.</p>
+                                
+                                <div class="row mb-4">
+                                    <div class="col-md-6">
+                                        <button type="button" class="btn btn-outline-primary" onclick="testProxyConnection()">
+                                            Test Database & Proxy Table
+                                        </button>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <button type="button" class="btn btn-outline-info" onclick="getProxyStats()">
+                                            Get Proxy Statistics
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                <!-- Proxy Test Results -->
+                                <div id="proxy-test-results" style="display: none;">
+                                    <h6>Proxy Test Results</h6>
+                                    <div id="proxy-test-content"></div>
+                                </div>
+                                
+                                <!-- Proxy Statistics -->
+                                <div id="proxy-stats-results" style="display: none;">
+                                    <h6>Proxy Statistics</h6>
+                                    <div id="proxy-stats-content"></div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -226,6 +323,6 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/static/script.js?v=6"></script>
+    <script src="/static/script.js?v=7"></script>
 </body>
 </html> 

@@ -1,6 +1,12 @@
 // Load configuration status on page load
 document.addEventListener('DOMContentLoaded', function() {
     loadConfigStatus();
+    
+    // Add proxy toggle event listener
+    const proxyToggle = document.getElementById('proxy-toggle');
+    if (proxyToggle) {
+        proxyToggle.addEventListener('change', toggleProxyUsage);
+    }
 });
 
 // Provider field toggle function
@@ -96,41 +102,131 @@ async function loadConfigStatus() {
         const response = await fetch('/api/config/status');
         const data = await response.json();
         
-        // Update status indicators
-        updateStatusIndicator('scrapegraph-status', data.scrapegraph_configured);
-        updateStatusIndicator('database-status', data.database_configured);
+        console.log('Configuration status:', data);
         
-        // Pre-fill form if configuration exists
-        if (data.scrapegraph_configured && data.scrapegraph_config) {
-            const config = data.scrapegraph_config;
-            if (config.provider) document.getElementById('provider').value = config.provider;
-            if (config.model) document.getElementById('model').value = config.model;
-            if (config.base_url) document.getElementById('base-url').value = config.base_url;
-            if (config.temperature !== undefined) document.getElementById('temperature').value = config.temperature;
-            if (config.max_tokens) document.getElementById('max-tokens').value = config.max_tokens;
-            
-            // Trigger provider field toggle to show appropriate fields
-            toggleProviderFields();
-            
-            // Fill Azure-specific fields if present
-            if (config.additional_params) {
-                const params = config.additional_params;
-                if (params.api_version) document.getElementById('api-version').value = params.api_version;
-                if (params.deployment_name) document.getElementById('deployment-name').value = params.deployment_name;
-                if (params.embeddings_deployment) document.getElementById('embeddings-deployment').value = params.embeddings_deployment;
-            }
-        }
+        // Update ScrapeGraph AI status
+        updateStatusIndicator('scrapegraph-status', data.scrapegraph.status === 'configured', data.scrapegraph.status);
+        
+        // Update Database status
+        updateStatusIndicator('database-status', data.database.status === 'connected', data.database.status);
+        updateDatabaseDetails(data.database);
+        
+        // Update Proxy status
+        updateProxyStatus(data.proxy);
+        
     } catch (error) {
         console.error('Error loading config status:', error);
+        showAlert('Error loading configuration status: ' + error.message, 'danger');
     }
 }
 
-// Update status indicator
-function updateStatusIndicator(elementId, isConfigured) {
+// Update status indicator with more detailed status
+function updateStatusIndicator(elementId, isConfigured, status) {
     const element = document.getElementById(elementId);
     if (element) {
-        element.className = isConfigured ? 'badge bg-success' : 'badge bg-warning';
-        element.textContent = isConfigured ? 'Configured' : 'Not Configured';
+        let badgeClass = 'badge bg-warning';
+        let text = 'Not Configured';
+        
+        switch(status) {
+            case 'configured':
+            case 'connected':
+                badgeClass = 'badge bg-success';
+                text = status === 'configured' ? 'Configured' : 'Connected';
+                break;
+            case 'error':
+                badgeClass = 'badge bg-danger';
+                text = 'Error';
+                break;
+            case 'not_configured':
+            default:
+                badgeClass = 'badge bg-warning';
+                text = 'Not Configured';
+        }
+        
+        element.className = badgeClass;
+        element.textContent = text;
+    }
+}
+
+// Update database details
+function updateDatabaseDetails(databaseConfig) {
+    const detailsElement = document.getElementById('database-details');
+    if (detailsElement && databaseConfig.message) {
+        detailsElement.textContent = databaseConfig.message;
+        detailsElement.style.display = 'block';
+    }
+}
+
+// Update proxy status and controls
+function updateProxyStatus(proxyConfig) {
+    const statusElement = document.getElementById('proxy-status');
+    const detailsElement = document.getElementById('proxy-details');
+    const controlsElement = document.getElementById('proxy-controls');
+    const toggleElement = document.getElementById('proxy-toggle');
+    
+    if (statusElement) {
+        let badgeClass = 'badge bg-secondary';
+        let text = 'Disabled';
+        
+        if (proxyConfig.status === 'ready') {
+            badgeClass = 'badge bg-success';
+            text = 'Ready';
+        } else if (proxyConfig.enabled) {
+            badgeClass = 'badge bg-warning';
+            text = 'Enabled (No Proxies)';
+        }
+        
+        statusElement.className = badgeClass;
+        statusElement.textContent = text;
+    }
+    
+    if (detailsElement) {
+        if (proxyConfig.available_proxies > 0) {
+            detailsElement.textContent = `${proxyConfig.available_proxies} proxies available`;
+            detailsElement.style.display = 'block';
+        } else {
+            detailsElement.style.display = 'none';
+        }
+    }
+    
+    if (controlsElement && toggleElement) {
+        // Show controls if database is configured
+        if (proxyConfig.available_proxies >= 0) {
+            controlsElement.style.display = 'block';
+            toggleElement.checked = proxyConfig.enabled;
+        } else {
+            controlsElement.style.display = 'none';
+        }
+    }
+}
+
+// Toggle proxy usage
+async function toggleProxyUsage() {
+    const enabled = document.getElementById('proxy-toggle').checked;
+    
+    try {
+        const formData = new FormData();
+        formData.append('enabled', enabled);
+        
+        const response = await fetch('/api/config/proxy/toggle', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            showAlert(result.message, 'success');
+            loadConfigStatus(); // Reload status
+        } else {
+            showAlert('Error: ' + result.detail, 'danger');
+            // Revert toggle state
+            document.getElementById('proxy-toggle').checked = !enabled;
+        }
+    } catch (error) {
+        showAlert('Error toggling proxy usage: ' + error.message, 'danger');
+        // Revert toggle state
+        document.getElementById('proxy-toggle').checked = !enabled;
     }
 }
 
@@ -191,8 +287,8 @@ document.getElementById('database-config-form').addEventListener('submit', async
     
     const formData = new FormData();
     formData.append('host', document.getElementById('db-host').value);
+    formData.append('port', document.getElementById('db-port').value);
     formData.append('database', document.getElementById('db-name').value);
-    formData.append('table', document.getElementById('db-table').value);
     formData.append('username', document.getElementById('db-username').value);
     formData.append('password', document.getElementById('db-password').value);
     
@@ -205,7 +301,7 @@ document.getElementById('database-config-form').addEventListener('submit', async
         const result = await response.json();
         
         if (response.ok) {
-            showAlert('Database configuration saved successfully!', 'success');
+            showAlert(`Database configuration saved! ${result.proxy_table_status}`, 'success');
             loadConfigStatus(); // Reload status
         } else {
             showAlert('Error: ' + result.detail, 'danger');
@@ -215,6 +311,160 @@ document.getElementById('database-config-form').addEventListener('submit', async
     }
 });
 
+// Test database connection
+async function testDatabaseConnection() {
+    try {
+        const response = await fetch('/api/proxy/test');
+        const result = await response.json();
+        
+        if (result.success) {
+            showAlert(`Database test successful! ${result.message}`, 'success');
+        } else {
+            showAlert(`Database test failed: ${result.message}`, 'danger');
+        }
+    } catch (error) {
+        showAlert('Error testing database: ' + error.message, 'danger');
+    }
+}
+
+// Delete database configuration
+async function deleteDatabaseConfig() {
+    if (!confirm('Are you sure you want to delete the database configuration? This will also disable proxy usage.')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/config/database', {
+            method: 'DELETE'
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            showAlert('Database configuration deleted successfully!', 'success');
+            loadConfigStatus(); // Reload status
+            // Clear form
+            document.getElementById('database-config-form').reset();
+        } else {
+            showAlert('Error: ' + result.detail, 'danger');
+        }
+    } catch (error) {
+        showAlert('Error deleting database configuration: ' + error.message, 'danger');
+    }
+}
+
+// Test proxy connection
+async function testProxyConnection() {
+    const testResults = document.getElementById('proxy-test-results');
+    const testContent = document.getElementById('proxy-test-content');
+    
+    testContent.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Testing...</div>';
+    testResults.style.display = 'block';
+    
+    try {
+        const response = await fetch('/api/proxy/test');
+        const result = await response.json();
+        
+        if (result.success) {
+            let proxyList = '';
+            if (result.sample_proxies && result.sample_proxies.length > 0) {
+                proxyList = '<h6>Sample Proxies:</h6><ul>';
+                result.sample_proxies.forEach(proxy => {
+                    proxyList += `<li>${proxy.address}:${proxy.port} (${proxy.type}) - Errors: ${proxy.error_count} ${proxy.has_auth ? '🔐' : ''}</li>`;
+                });
+                proxyList += '</ul>';
+            }
+            
+            testContent.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>Success!</strong> ${result.message}
+                </div>
+                ${proxyList}
+            `;
+        } else {
+            testContent.innerHTML = `
+                <div class="alert alert-danger">
+                    <strong>Failed!</strong> ${result.message}
+                </div>
+            `;
+        }
+    } catch (error) {
+        testContent.innerHTML = `
+            <div class="alert alert-danger">
+                <strong>Error!</strong> ${error.message}
+            </div>
+        `;
+    }
+}
+
+// Get proxy statistics
+async function getProxyStats() {
+    const statsResults = document.getElementById('proxy-stats-results');
+    const statsContent = document.getElementById('proxy-stats-content');
+    
+    statsContent.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading...</div>';
+    statsResults.style.display = 'block';
+    
+    try {
+        const response = await fetch('/api/proxy/stats');
+        const result = await response.json();
+        
+        if (result.error) {
+            statsContent.innerHTML = `
+                <div class="alert alert-danger">
+                    <strong>Error!</strong> ${result.error}
+                </div>
+            `;
+        } else {
+            statsContent.innerHTML = `
+                <div class="row">
+                    <div class="col-md-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h5 class="card-title">${result.total_proxies || 0}</h5>
+                                <p class="card-text">Total Proxies</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h5 class="card-title">${result.active_proxies || 0}</h5>
+                                <p class="card-text">Active Proxies</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h5 class="card-title">${result.usable_proxies || 0}</h5>
+                                <p class="card-text">Usable Proxies<br><small>(error_count < 5)</small></p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h5 class="card-title">${result.high_error_proxies || 0}</h5>
+                                <p class="card-text">High Error Proxies<br><small>(error_count ≥ 5)</small></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <p><strong>Average Error Count:</strong> ${result.avg_error_count ? parseFloat(result.avg_error_count).toFixed(2) : 'N/A'}</p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        statsContent.innerHTML = `
+            <div class="alert alert-danger">
+                <strong>Error!</strong> ${error.message}
+            </div>
+        `;
+    }
+}
+
 // Scrape with selected method
 async function scrapeWithMethod(method) {
     const url = document.getElementById('url').value;
@@ -223,6 +473,7 @@ async function scrapeWithMethod(method) {
         return;
     }
     
+    const useProxy = document.getElementById('use-proxy-test').checked;
     const resultsDiv = document.getElementById('scrape-results');
     const resultsContent = document.getElementById('results-content');
     
@@ -231,12 +482,17 @@ async function scrapeWithMethod(method) {
     resultsDiv.style.display = 'block';
     
     try {
+        const requestBody = { url: url };
+        if (useProxy) {
+            requestBody.use_proxy = true;
+        }
+        
         const response = await fetch(`/api/scrape/${method}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ url: url })
+            body: JSON.stringify(requestBody)
         });
         
         const result = await response.json();
@@ -244,6 +500,14 @@ async function scrapeWithMethod(method) {
         if (result.status === 'success') {
             let contentDisplay = '';
             let imageDisplay = '';
+            let proxyInfo = '';
+            
+            // Show proxy usage info
+            if (result.proxy_used) {
+                proxyInfo = `<div class="alert alert-info"><small>🌐 Used proxy: ${result.proxy_used}</small></div>`;
+            } else if (useProxy) {
+                proxyInfo = `<div class="alert alert-warning"><small>⚠️ Proxy requested but not used (no proxies available)</small></div>`;
+            }
             
             // Debug: Log the actual response structure
             console.log('API Response:', result);
@@ -293,6 +557,7 @@ async function scrapeWithMethod(method) {
                 <div class="alert alert-success">
                     <strong>Success!</strong> Scraped using ${method === 'newspaper' ? 'Newspaper4k' : 'ScrapGraph AI'}
                 </div>
+                ${proxyInfo}
                 <div class="row">
                     <div class="col-md-8">
                         ${contentDisplay}
@@ -304,10 +569,16 @@ async function scrapeWithMethod(method) {
                 </div>
             `;
         } else {
+            let proxyInfo = '';
+            if (result.proxy_used) {
+                proxyInfo = `<div class="alert alert-warning"><small>🌐 Failed with proxy: ${result.proxy_used}</small></div>`;
+            }
+            
             resultsContent.innerHTML = `
                 <div class="alert alert-danger">
                     <strong>Error!</strong> ${result.error || 'Unknown error occurred'}
                 </div>
+                ${proxyInfo}
             `;
         }
     } catch (error) {
