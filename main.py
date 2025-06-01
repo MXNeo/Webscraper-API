@@ -19,6 +19,7 @@ import random
 import time
 from database import DatabaseManager
 import requests
+from urllib.parse import quote
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -769,8 +770,10 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
                     
                     # Build proxy URL with authentication embedded
                     if selected_proxy.get('username') and selected_proxy.get('password'):
-                        # Include credentials in the proxy URL for proper authentication
-                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['username']}:{selected_proxy['password']}@{selected_proxy['address']}:{selected_proxy['port']}"
+                        # URL-encode credentials to handle special characters
+                        username = quote(selected_proxy['username'], safe='')
+                        password = quote(selected_proxy['password'], safe='')
+                        proxy_address = f"{selected_proxy['type']}://{username}:{password}@{selected_proxy['address']}:{selected_proxy['port']}"
                         logger.info(f"Using authenticated proxy for ScrapGraph AI: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
                     else:
                         # No authentication
@@ -940,8 +943,10 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                 if selected_proxy:
                     # Build proxy URL with authentication embedded
                     if selected_proxy.get('username') and selected_proxy.get('password'):
-                        # Include credentials in the proxy URL for proper authentication
-                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['username']}:{selected_proxy['password']}@{selected_proxy['address']}:{selected_proxy['port']}"
+                        # URL-encode credentials to handle special characters
+                        username = quote(selected_proxy['username'], safe='')
+                        password = quote(selected_proxy['password'], safe='')
+                        proxy_address = f"{selected_proxy['type']}://{username}:{password}@{selected_proxy['address']}:{selected_proxy['port']}"
                         logger.info(f"Using authenticated proxy for newspaper4k: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
                     else:
                         # No authentication
