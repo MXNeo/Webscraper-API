@@ -19,7 +19,6 @@ import random
 import time
 from database import DatabaseManager
 import requests
-from requests.auth import HTTPProxyAuth
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -768,27 +767,26 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
                         'Upgrade-Insecure-Requests': '1',
                     }
                     
-                    # Configure proxy without authentication in URL
-                    proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
+                    # Build proxy URL with authentication embedded
+                    if selected_proxy.get('username') and selected_proxy.get('password'):
+                        # Include credentials in the proxy URL for proper authentication
+                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['username']}:{selected_proxy['password']}@{selected_proxy['address']}:{selected_proxy['port']}"
+                        logger.info(f"Using authenticated proxy for ScrapGraph AI: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
+                    else:
+                        # No authentication
+                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
+                        logger.info(f"Using proxy for ScrapGraph AI (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
+                    
                     proxies = {
                         'http': proxy_address,
                         'https': proxy_address
                     }
-                    
-                    # Set up authentication if available
-                    auth = None
-                    if selected_proxy.get('username') and selected_proxy.get('password'):
-                        auth = HTTPProxyAuth(selected_proxy['username'], selected_proxy['password'])
-                        logger.info(f"Using authenticated proxy for ScrapGraph AI: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
-                    else:
-                        logger.info(f"Using proxy for ScrapGraph AI (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
                     
                     logger.debug(f"Fetching URL with proxy for ScrapGraph AI: {url}")
                     response = requests.get(
                         url,
                         headers=headers,
                         proxies=proxies,
-                        auth=auth,
                         timeout=30,
                         allow_redirects=True,
                         verify=True
@@ -939,21 +937,21 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                 
                 # Configure proxy if available
                 proxies = None
-                auth = None
                 if selected_proxy:
-                    # Configure proxy without authentication in URL
-                    proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
+                    # Build proxy URL with authentication embedded
+                    if selected_proxy.get('username') and selected_proxy.get('password'):
+                        # Include credentials in the proxy URL for proper authentication
+                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['username']}:{selected_proxy['password']}@{selected_proxy['address']}:{selected_proxy['port']}"
+                        logger.info(f"Using authenticated proxy for newspaper4k: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
+                    else:
+                        # No authentication
+                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
+                        logger.info(f"Using proxy for newspaper4k (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
+                    
                     proxies = {
                         'http': proxy_address,
                         'https': proxy_address
                     }
-                    
-                    # Set up authentication if available
-                    if selected_proxy.get('username') and selected_proxy.get('password'):
-                        auth = HTTPProxyAuth(selected_proxy['username'], selected_proxy['password'])
-                        logger.info(f"Using authenticated proxy for newspaper4k: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
-                    else:
-                        logger.info(f"Using proxy for newspaper4k (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
                 
                 # Make the request manually with or without proxy
                 logger.debug(f"Fetching URL: {url}")
@@ -961,7 +959,6 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                     url,
                     headers=headers,
                     proxies=proxies,
-                    auth=auth,
                     timeout=30,
                     allow_redirects=True,
                     verify=True
