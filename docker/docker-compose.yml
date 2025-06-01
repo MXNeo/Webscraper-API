@@ -1,6 +1,8 @@
 services:
   webscraper-api:
-    build: .
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - "8000:8000"
     environment:

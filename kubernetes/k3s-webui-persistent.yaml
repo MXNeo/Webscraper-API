@@ -44,7 +44,8 @@ spec:
     spec:
       containers:
       - name: webscraper-api
-        image: neoexec/webscraper-api:latest
+        image: neoexec/webscraper-api:v1.1.5
+        imagePullPolicy: Always
         ports:
         - containerPort: 8000
         env:

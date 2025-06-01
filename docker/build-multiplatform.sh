@@ -7,7 +7,7 @@ set -e
 
 # Configuration
 IMAGE_NAME="neoexec/webscraper-api"
-VERSION="latest"
+VERSION="1.1.9"
 PLATFORMS="linux/amd64,linux/arm64"
 
 echo "🚀 Building multi-platform WebScraper API Docker image"
@@ -40,7 +40,7 @@ echo "🏗️  Building multi-platform image..."
 docker buildx build \
     --platform $PLATFORMS \
     --tag $IMAGE_NAME:$VERSION \
-    --tag $IMAGE_NAME:v1.0.0 \
+    --tag $IMAGE_NAME:latest \
     --push \
     --file Dockerfile \
     ..

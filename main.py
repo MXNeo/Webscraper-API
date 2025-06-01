@@ -18,6 +18,8 @@ import platform
 import random
 import time
 from database import DatabaseManager
+import requests
+from requests.auth import HTTPProxyAuth
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -77,8 +79,8 @@ config_store = {
     "last_proxy_test": None  # New: last proxy test result
 }
 
-# Initialize database manager
-db_manager = DatabaseManager()
+# Initialize database manager with config store
+db_manager = DatabaseManager(config_store)
 
 # Models
 class ScrapeRequest(BaseModel):
@@ -374,6 +376,98 @@ async def delete_scrapegraph_config():
     logger.info("ScrapeGraph AI configuration deleted")
     return {"message": "ScrapeGraph AI configuration deleted", "status": "not_configured"}
 
+@app.post("/api/config/database/test")
+async def test_database_config(
+    host: str = Form(...),
+    port: int = Form(5432),
+    database: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...)
+):
+    """Test database configuration without saving it"""
+    try:
+        logger.info(f"Testing database configuration (without saving):")
+        logger.info(f"  Host: {host}")
+        logger.info(f"  Port: {port}")
+        logger.info(f"  Database: {database}")
+        logger.info(f"  Username: {username}")
+        logger.info(f"  Password: {'*' * len(password) if password else 'None'}")
+        
+        # Validate input parameters
+        if not host or not host.strip():
+            logger.error("Database host is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database host is required and cannot be empty")
+        
+        if not database or not database.strip():
+            logger.error("Database name is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database name is required and cannot be empty")
+        
+        if not username or not username.strip():
+            logger.error("Database username is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database username is required and cannot be empty")
+        
+        if not password or not password.strip():
+            logger.error("Database password is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database password is required and cannot be empty")
+        
+        if not isinstance(port, int) or port <= 0 or port > 65535:
+            logger.error(f"Invalid port number: {port}")
+            raise HTTPException(status_code=400, detail="Port must be a valid number between 1 and 65535")
+        
+        # Create temporary configuration for testing
+        temp_config = {
+            "host": host.strip(),
+            "port": port,
+            "database": database.strip(),
+            "username": username.strip(),
+            "password": password.strip()
+        }
+        
+        logger.info("Testing database connection with provided credentials...")
+        
+        # Temporarily store config for testing
+        original_config = config_store.get("database")
+        config_store["database"] = temp_config
+        
+        try:
+            # Test the connection
+            db_test_result, db_test_message = db_manager.test_connection()
+            
+            if not db_test_result:
+                logger.error(f"Database connection test failed: {db_test_message}")
+                return {
+                    "success": False,
+                    "message": db_test_message,
+                    "proxy_table_status": "Not tested - connection failed",
+                    "available_proxies": 0
+                }
+            
+            logger.info("Database connection successful, testing proxy table...")
+            
+            # Test proxy table
+            proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
+            
+            logger.info(f"Database test completed: {host}:{port}/{database}")
+            logger.info(f"Proxy table test: {proxy_test_message}")
+            
+            return {
+                "success": True,
+                "message": "Database connection test successful",
+                "proxy_table_status": proxy_test_message,
+                "available_proxies": proxy_count,
+                "proxy_table_ok": proxy_test_result
+            }
+            
+        finally:
+            # Restore original configuration
+            config_store["database"] = original_config
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error testing database configuration: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 @app.post("/api/config/database")
 async def save_database_config(
     host: str = Form(...),
@@ -384,23 +478,57 @@ async def save_database_config(
 ):
     """Save database configuration and test connection"""
     try:
+        logger.info(f"Received database configuration request:")
+        logger.info(f"  Host: {host}")
+        logger.info(f"  Port: {port}")
+        logger.info(f"  Database: {database}")
+        logger.info(f"  Username: {username}")
+        logger.info(f"  Password: {'*' * len(password) if password else 'None'}")
+        
+        # Validate input parameters
+        if not host or not host.strip():
+            logger.error("Database host is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database host is required and cannot be empty")
+        
+        if not database or not database.strip():
+            logger.error("Database name is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database name is required and cannot be empty")
+        
+        if not username or not username.strip():
+            logger.error("Database username is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database username is required and cannot be empty")
+        
+        if not password or not password.strip():
+            logger.error("Database password is empty or invalid")
+            raise HTTPException(status_code=400, detail="Database password is required and cannot be empty")
+        
+        if not isinstance(port, int) or port <= 0 or port > 65535:
+            logger.error(f"Invalid port number: {port}")
+            raise HTTPException(status_code=400, detail="Port must be a valid number between 1 and 65535")
+        
         config = {
-            "host": host,
+            "host": host.strip(),
             "port": port,
-            "database": database,
-            "username": username,
-            "password": password,
+            "database": database.strip(),
+            "username": username.strip(),
+            "password": password.strip(),
             "configured_at": time.time()
         }
         
+        logger.info("Database configuration validated, testing connection...")
+        
         # Test the connection before saving
         config_store["database"] = config
+        logger.info("Testing database connection...")
         db_test_result, db_test_message = db_manager.test_connection()
         
         if not db_test_result:
             # Remove the config if test failed
             config_store["database"] = None
+            logger.error(f"Database connection test failed: {db_test_message}")
             raise HTTPException(status_code=400, detail=f"Database connection test failed: {db_test_message}")
+        
+        logger.info("Database connection successful, testing proxy table...")
         
         # Test proxy table
         proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
@@ -419,8 +547,8 @@ async def save_database_config(
         raise
     except Exception as e:
         config_store["database"] = None
-        logger.error(f"Error saving database configuration: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error saving database configuration: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.delete("/api/config/database")
 async def delete_database_config():
@@ -536,6 +664,45 @@ async def get_proxy_stats():
         logger.error(f"Failed to get proxy statistics: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/proxy/debug")
+async def debug_proxy_data():
+    """Debug endpoint to show proxy data structure (with masked credentials)"""
+    try:
+        if not config_store["database"]:
+            return {"error": "Database not configured"}
+        
+        # Get one proxy for debugging
+        proxies = db_manager.get_proxies(count=1)
+        if not proxies:
+            return {"error": "No proxies available"}
+        
+        proxy = proxies[0]
+        
+        # Mask sensitive data for debugging
+        debug_proxy = {
+            "id": proxy.get("id"),
+            "address": proxy.get("address"),
+            "port": proxy.get("port"),
+            "type": proxy.get("type"),
+            "error_count": proxy.get("error_count"),
+            "status": proxy.get("status", "unknown"),
+            "username": "***" if proxy.get("username") else None,
+            "password": "***" if proxy.get("password") else None,
+            "has_auth": bool(proxy.get("username") and proxy.get("password")),
+            "proxy_url_sample": proxy.get("proxy_url", "").replace(
+                proxy.get("username", ""), "***").replace(
+                proxy.get("password", ""), "***") if proxy.get("proxy_url") else None
+        }
+        
+        return {
+            "proxy_data": debug_proxy,
+            "expected_format": "http://username:password@ip:port or https://username:password@ip:port"
+        }
+        
+    except Exception as e:
+        logger.error(f"Debug proxy data failed: {str(e)}")
+        return {"error": str(e)}
+
 # Update the scraping endpoints to use stored configuration
 @app.post("/api/scrape/scrapegraph")
 async def scrape_with_scrapegraph_config(request: ScrapeRequest):
@@ -558,6 +725,21 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
         if not api_key.startswith("sk-") or len(api_key) < 20:
             raise HTTPException(status_code=400, detail="Invalid API key format. Please provide a valid OpenAI API key starting with 'sk-'")
         
+        # Check if proxy should be used
+        use_proxy = request.use_proxy or config_store.get("proxy_enabled", False)
+        selected_proxy = None
+        proxy_id = None
+        
+        if use_proxy and config_store["database"]:
+            # Get a proxy from the database
+            proxies = db_manager.get_proxies(count=1)
+            if proxies:
+                selected_proxy = proxies[0]
+                proxy_id = selected_proxy["id"]
+                logger.info(f"Using proxy {proxy_id} for ScrapGraph AI: {selected_proxy['address']}:{selected_proxy['port']}")
+            else:
+                logger.warning("Proxy requested but no proxies available, proceeding without proxy")
+        
         # Build configuration for ScrapeGraph AI
         llm_config = {
             "llm": {
@@ -574,40 +756,130 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
         
         # Define the scraping function to run in thread pool
         def run_scraper():
-            scraper = SmartScraperGraph(
-                prompt="""Extract the following information from this webpage and return it as a JSON object:
-                {
-                    "content": "The complete article content/text without HTML markup - include the full text without truncating",
-                    "top_image": "URL of the main article image if available",
-                    "published": "Publication date if available"
-                }
-                
-                Please extract the complete article text without truncating. If any field is not available, use null.""",
-                source=url,
-                config=llm_config
-            )
-            result = scraper.run()
-            
-            # Handle nested content structure that sometimes occurs
-            if isinstance(result, dict) and 'content' in result:
-                # If the result has nested content, flatten it
-                if isinstance(result['content'], dict) and 'content' in result['content']:
-                    return {
-                        'content': result['content']['content'],
-                        'top_image': result['content'].get('top_image'),
-                        'published': result['content'].get('published')
+            try:
+                # If using proxy, fetch content manually first
+                if selected_proxy:
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
                     }
-            
-            return result
+                    
+                    # Configure proxy without authentication in URL
+                    proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
+                    proxies = {
+                        'http': proxy_address,
+                        'https': proxy_address
+                    }
+                    
+                    # Set up authentication if available
+                    auth = None
+                    if selected_proxy.get('username') and selected_proxy.get('password'):
+                        auth = HTTPProxyAuth(selected_proxy['username'], selected_proxy['password'])
+                        logger.info(f"Using authenticated proxy for ScrapGraph AI: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
+                    else:
+                        logger.info(f"Using proxy for ScrapGraph AI (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
+                    
+                    logger.debug(f"Fetching URL with proxy for ScrapGraph AI: {url}")
+                    response = requests.get(
+                        url,
+                        headers=headers,
+                        proxies=proxies,
+                        auth=auth,
+                        timeout=30,
+                        allow_redirects=True,
+                        verify=True
+                    )
+                    response.raise_for_status()
+                    
+                    logger.debug(f"Successfully fetched content via proxy, status: {response.status_code}")
+                    
+                    # Use the fetched HTML as source for ScrapGraph AI
+                    scraper = SmartScraperGraph(
+                        prompt="""Extract the following information from this webpage and return it as a JSON object:
+                        {
+                            "content": "The complete article content/text without HTML markup - include the full text without truncating",
+                            "top_image": "URL of the main article image if available",
+                            "published": "Publication date if available"
+                        }
+                        
+                        Please extract the complete article text without truncating. If any field is not available, use null.""",
+                        source=response.text,  # Use fetched HTML instead of URL
+                        config=llm_config
+                    )
+                    
+                    # Update proxy success
+                    if proxy_id:
+                        db_manager.update_proxy_last_used(proxy_id)
+                        logger.debug(f"Updated last_used for proxy {proxy_id}")
+                        
+                else:
+                    # Use URL directly without proxy
+                    scraper = SmartScraperGraph(
+                        prompt="""Extract the following information from this webpage and return it as a JSON object:
+                        {
+                            "content": "The complete article content/text without HTML markup - include the full text without truncating",
+                            "top_image": "URL of the main article image if available",
+                            "published": "Publication date if available"
+                        }
+                        
+                        Please extract the complete article text without truncating. If any field is not available, use null.""",
+                        source=url,
+                        config=llm_config
+                    )
+                
+                result = scraper.run()
+                
+                # Handle nested content structure that sometimes occurs
+                if isinstance(result, dict) and 'content' in result:
+                    # If the result has nested content, flatten it
+                    if isinstance(result['content'], dict) and 'content' in result['content']:
+                        return {
+                            'content': result['content']['content'],
+                            'top_image': result['content'].get('top_image'),
+                            'published': result['content'].get('published')
+                        }
+                
+                return result
+                
+            except requests.exceptions.ProxyError as e:
+                error_msg = f"Proxy error: {str(e)}"
+                logger.error(error_msg)
+                if proxy_id and selected_proxy:
+                    logger.warning(f"Proxy {proxy_id} failed, incrementing error count")
+                    db_manager.increment_proxy_error(proxy_id)
+                raise Exception(error_msg)
+                
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Request failed: {str(e)}"
+                logger.error(error_msg)
+                if proxy_id and selected_proxy:
+                    logger.warning(f"Request failed with proxy {proxy_id}, incrementing error count")
+                    db_manager.increment_proxy_error(proxy_id)
+                raise Exception(error_msg)
+                
+            except Exception as e:
+                if proxy_id and selected_proxy:
+                    logger.warning(f"ScrapGraph AI failed with proxy {proxy_id}, incrementing error count")
+                    db_manager.increment_proxy_error(proxy_id)
+                raise e
         
         # Run the scraper in a thread pool to avoid asyncio.run() conflict
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(thread_pool, run_scraper)
         
+        proxy_info = None
+        if selected_proxy:
+            proxy_info = f"{selected_proxy['address']}:{selected_proxy['port']}"
+        
         return ScrapeResponse(
             url=url,
             content=result,
-            status="success"
+            status="success",
+            proxy_used=proxy_info
         )
         
     except HTTPException:
@@ -618,11 +890,16 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
         if "Model not supported" in error_msg:
             error_msg = f"Model not supported. Please check your API key is valid and the model '{stored_config.get('model', 'gpt-4o-mini')}' is available with your OpenAI account."
         
+        proxy_info = None
+        if selected_proxy:
+            proxy_info = f"{selected_proxy['address']}:{selected_proxy['port']}"
+        
         return ScrapeResponse(
             url=str(request.url),
             content={},
             status="error",
-            error=error_msg
+            error=error_msg,
+            proxy_used=proxy_info
         )
 
 @app.post("/api/scrape/newspaper")
@@ -650,16 +927,52 @@ async def scrape_with_newspaper(request: ScrapeRequest):
         # Define the scraping function to run in thread pool
         def run_newspaper_scraper():
             try:
-                article = Article(url)
+                # Prepare request configuration
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                }
                 
                 # Configure proxy if available
+                proxies = None
+                auth = None
                 if selected_proxy:
-                    # Set up proxy configuration for newspaper4k
-                    proxy_url = selected_proxy["proxy_url"]
-                    article.set_config(proxies={'http': proxy_url, 'https': proxy_url})
-                    logger.debug(f"Configured newspaper4k with proxy: {selected_proxy['address']}:{selected_proxy['port']}")
+                    # Configure proxy without authentication in URL
+                    proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
+                    proxies = {
+                        'http': proxy_address,
+                        'https': proxy_address
+                    }
+                    
+                    # Set up authentication if available
+                    if selected_proxy.get('username') and selected_proxy.get('password'):
+                        auth = HTTPProxyAuth(selected_proxy['username'], selected_proxy['password'])
+                        logger.info(f"Using authenticated proxy for newspaper4k: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
+                    else:
+                        logger.info(f"Using proxy for newspaper4k (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
                 
-                article.download()
+                # Make the request manually with or without proxy
+                logger.debug(f"Fetching URL: {url}")
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    proxies=proxies,
+                    auth=auth,
+                    timeout=30,
+                    allow_redirects=True,
+                    verify=True
+                )
+                response.raise_for_status()
+                
+                logger.debug(f"Successfully fetched content, status: {response.status_code}, size: {len(response.content)} bytes")
+                
+                # Create article and set the HTML content
+                article = Article(url)
+                article.download(input_html=response.text)
                 article.parse()
                 
                 # Update proxy success if used
@@ -668,18 +981,46 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                     logger.debug(f"Updated last_used for proxy {proxy_id}")
                 
                 # Standardize output to match ScrapGraph AI format
-                return {
+                result = {
                     "content": article.text,
                     "top_image": article.top_image,
                     "published": article.publish_date.isoformat() if article.publish_date else None
                 }
                 
-            except Exception as e:
-                # Handle proxy errors
+                logger.debug(f"Parsed article: content_length={len(result['content'])}, has_image={bool(result['top_image'])}, has_date={bool(result['published'])}")
+                return result
+                
+            except requests.exceptions.ProxyError as e:
+                error_msg = f"Proxy error: {str(e)}"
+                logger.error(error_msg)
                 if proxy_id and selected_proxy:
-                    logger.warning(f"Scraping failed with proxy {proxy_id}, incrementing error count: {str(e)}")
+                    logger.warning(f"Proxy {proxy_id} failed, incrementing error count")
                     db_manager.increment_proxy_error(proxy_id)
-                raise e
+                raise Exception(error_msg)
+                
+            except requests.exceptions.Timeout as e:
+                error_msg = f"Request timeout: {str(e)}"
+                logger.error(error_msg)
+                if proxy_id and selected_proxy:
+                    logger.warning(f"Proxy {proxy_id} timeout, incrementing error count")
+                    db_manager.increment_proxy_error(proxy_id)
+                raise Exception(error_msg)
+                
+            except requests.exceptions.RequestException as e:
+                error_msg = f"Request failed: {str(e)}"
+                logger.error(error_msg)
+                if proxy_id and selected_proxy:
+                    logger.warning(f"Request failed with proxy {proxy_id}, incrementing error count")
+                    db_manager.increment_proxy_error(proxy_id)
+                raise Exception(error_msg)
+                
+            except Exception as e:
+                error_msg = f"Scraping failed: {str(e)}"
+                logger.error(error_msg)
+                if proxy_id and selected_proxy:
+                    logger.warning(f"Scraping failed with proxy {proxy_id}, incrementing error count")
+                    db_manager.increment_proxy_error(proxy_id)
+                raise Exception(error_msg)
         
         # Run the scraper in a thread pool
         loop = asyncio.get_event_loop()
