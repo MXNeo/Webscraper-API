@@ -314,16 +314,71 @@ document.getElementById('database-config-form').addEventListener('submit', async
 // Test database connection
 async function testDatabaseConnection() {
     try {
-        const response = await fetch('/api/proxy/test');
+        // Get form data
+        const form = document.getElementById('database-config-form');
+        const formData = new FormData(form);
+        
+        // Validate required fields - using correct field names from HTML
+        const host = document.getElementById('db-host').value;
+        const database = document.getElementById('db-name').value;
+        const username = document.getElementById('db-username').value;
+        const password = document.getElementById('db-password').value;
+        const port = document.getElementById('db-port').value;
+        
+        if (!host || !database || !username || !password) {
+            showAlert('Please fill in all required database fields before testing', 'warning');
+            return;
+        }
+        
+        // Create FormData with correct field names for the API
+        const testFormData = new FormData();
+        testFormData.append('host', host);
+        testFormData.append('port', port || 5432);
+        testFormData.append('database', database);
+        testFormData.append('username', username);
+        testFormData.append('password', password);
+        
+        // Show loading state
+        const testButton = document.querySelector('button[onclick="testDatabaseConnection()"]');
+        const originalText = testButton.textContent;
+        testButton.disabled = true;
+        testButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Testing...';
+        
+        const response = await fetch('/api/config/database/test', {
+            method: 'POST',
+            body: testFormData
+        });
+        
         const result = await response.json();
         
-        if (result.success) {
-            showAlert(`Database test successful! ${result.message}`, 'success');
+        if (response.ok && result.success) {
+            let message = `✅ ${result.message}`;
+            if (result.proxy_table_ok) {
+                message += `\n📊 ${result.proxy_table_status}`;
+                if (result.available_proxies > 0) {
+                    message += `\n🔗 ${result.available_proxies} proxies available for use`;
+                }
+            } else {
+                message += `\n⚠️ ${result.proxy_table_status}`;
+            }
+            showAlert(message, 'success');
         } else {
-            showAlert(`Database test failed: ${result.message}`, 'danger');
+            const errorMessage = result.detail || result.message || 'Unknown error occurred';
+            showAlert(`❌ Database test failed: ${errorMessage}`, 'danger');
         }
+        
+        // Restore button state
+        testButton.disabled = false;
+        testButton.textContent = originalText;
+        
     } catch (error) {
-        showAlert('Error testing database: ' + error.message, 'danger');
+        console.error('Database test error:', error);
+        showAlert('❌ Error testing database: ' + error.message, 'danger');
+        
+        // Restore button state
+        const testButton = document.querySelector('button[onclick="testDatabaseConnection()"]');
+        testButton.disabled = false;
+        testButton.textContent = 'Test Connection';
     }
 }
 

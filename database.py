@@ -2,23 +2,28 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Optional, Tuple
 import logging
-from config import Config
 import random
 
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    def __init__(self):
-        self.config = Config()
+    def __init__(self, config_store=None):
+        self.config_store = config_store
         self.connection = None
     
     def connect(self) -> bool:
         """Establish database connection"""
         try:
-            db_config = self.config.get_database_config()
+            db_config = self.get_database_config()
             if not db_config:
                 logger.warning("Database not configured")
                 return False
+            
+            logger.info(f"Attempting to connect to PostgreSQL database...")
+            logger.info(f"Host: {db_config['host']}")
+            logger.info(f"Port: {db_config.get('port', 5432)}")
+            logger.info(f"Database: {db_config['database']}")
+            logger.info(f"Username: {db_config['username']}")
             
             self.connection = psycopg2.connect(
                 host=db_config["host"],
@@ -31,9 +36,18 @@ class DatabaseManager:
             )
             logger.info(f"Successfully connected to database: {db_config['host']}:{db_config.get('port', 5432)}")
             return True
-        except Exception as e:
-            logger.error(f"Database connection failed: {str(e)}")
+        except psycopg2.OperationalError as e:
+            logger.error(f"PostgreSQL connection failed: {str(e)}")
             return False
+        except Exception as e:
+            logger.error(f"Database connection failed: {str(e)}", exc_info=True)
+            return False
+    
+    def get_database_config(self) -> Dict:
+        """Get database configuration from config store"""
+        if self.config_store and self.config_store.get("database"):
+            return self.config_store["database"]
+        return {}
     
     def disconnect(self):
         """Close database connection"""
@@ -45,23 +59,53 @@ class DatabaseManager:
     def test_connection(self) -> Tuple[bool, str]:
         """Test database connection and return status with message"""
         try:
+            logger.info("Starting database connection test...")
+            
+            db_config = self.get_database_config()
+            if not db_config:
+                logger.error("No database configuration found")
+                return False, "Database not configured"
+            
+            logger.info(f"Testing connection to {db_config['host']}:{db_config.get('port', 5432)}")
+            logger.info(f"Database: {db_config['database']}, Username: {db_config['username']}")
+            
             if self.connect():
+                logger.info("Database connection established successfully")
                 cursor = self.connection.cursor()
                 cursor.execute("SELECT 1 as test")
                 result = cursor.fetchone()
                 cursor.close()
                 self.disconnect()
+                
                 if result:
+                    logger.info("Database test query successful")
                     return True, "Database connection successful"
                 else:
+                    logger.error("Database test query returned no results")
                     return False, "Database query returned no results"
+            else:
+                logger.error("Failed to establish database connection")
+                return False, "Failed to establish database connection"
+                
         except psycopg2.OperationalError as e:
             error_msg = f"Database connection failed: {str(e)}"
             logger.error(error_msg)
-            return False, error_msg
+            
+            # Provide more specific error messages
+            if "could not connect to server" in str(e).lower():
+                return False, f"Cannot reach database server at {db_config.get('host', 'unknown')}:{db_config.get('port', 5432)}. Check if the server is running and accessible."
+            elif "authentication failed" in str(e).lower():
+                return False, f"Authentication failed for user '{db_config.get('username', 'unknown')}'. Check username and password."
+            elif "database" in str(e).lower() and "does not exist" in str(e).lower():
+                return False, f"Database '{db_config.get('database', 'unknown')}' does not exist on the server."
+            elif "timeout" in str(e).lower():
+                return False, "Connection timeout. The database server may be overloaded or network issues exist."
+            else:
+                return False, error_msg
+                
         except Exception as e:
             error_msg = f"Database test failed: {str(e)}"
-            logger.error(error_msg)
+            logger.error(error_msg, exc_info=True)
             return False, error_msg
         
         return False, "Unknown database connection error"
