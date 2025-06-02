@@ -1,4 +1,4 @@
-# WebScraper API 🚀
+# WebScraper API optimized for news articles 🚀
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/neoexec/webscraper-api)](https://hub.docker.com/r/neoexec/webscraper-api)
 [![Docker Image Size](https://img.shields.io/docker/image-size/neoexec/webscraper-api/latest)](https://hub.docker.com/r/neoexec/webscraper-api)
