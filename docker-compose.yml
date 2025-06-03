@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  webscraper-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DB_HOST=${DB_HOST:-localhost}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-webscraper}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - METRICS_ENABLED=${METRICS_ENABLED:-true}
+      - PERSIST_METRICS=${PERSIST_METRICS:-true}
+      - METRICS_DB_PATH=${METRICS_DB_PATH:-data/metrics.db}
+    volumes:
+      # Persistent volume for data (metrics database, configurations)
+      - webscraper_data:/app/data
+      # Optional: Mount configuration files
+      - webscraper_config:/app/config
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${DB_NAME:-webscraper}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      # Persistent volume for PostgreSQL data
+      - postgres_data:/var/lib/postgresql/data
+      # Optional: Initialize with proxy schema
+      - ./migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  # Named volumes for persistent data
+  webscraper_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data
+  
+  webscraper_config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./config
+  
+  postgres_data:
+    driver: local
+
+networks:
+  default:
+    name: webscraper_network 

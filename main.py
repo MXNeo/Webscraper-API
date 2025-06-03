@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, HttpUrl
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 import logging
 from pathlib import Path
@@ -20,6 +20,10 @@ import time
 from database import DatabaseManager
 import requests
 from urllib.parse import quote
+from proxy_pool import ProxyPool, EnhancedProxyRetryManager, ProxyInfo
+import uuid
+from metrics import init_metrics, record_request_metric
+from config import Config
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -70,17 +74,57 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     logger.warning("OPENAI_API_KEY not found in environment variables")
 
+# Initialize Config instance
+config_instance = Config()
+
 # Enhanced configuration store with status tracking
 config_store = {
     "scrapegraph": None,
     "database": None,
-    "proxy_enabled": False,  # New: proxy usage toggle
-    "last_db_test": None,    # New: last database test result
-    "last_proxy_test": None  # New: last proxy test result
+    "proxy_enabled": False,
+    "last_db_test": None,
+    "last_proxy_test": None,
+    "proxy_retry_count": 3,  # Number of proxy retries
+    "request_timeout": 15,   # Reduced timeout
+    "proxy_rotation_enabled": True,
+    # New proxy pool settings
+    "proxy_pool_size": 50,           # Number of proxies to keep in pool
+    "min_proxy_pool_size": 10,       # Minimum pool size before refresh
+    "proxy_refresh_interval": 300,   # Refresh pool every 5 minutes
+    "batch_update_interval": 60,     # Process batch updates every minute
+    # Metrics settings
+    "metrics_enabled": True,         # Enable metrics collection
+    "persist_metrics": True,         # Persist metrics to SQLite
+    "metrics_db_path": "data/metrics.db",  # Path to metrics database
+    "memory_retention_hours": 24,    # Keep metrics in memory for 24 hours
+    "db_retention_days": 30,         # Keep database metrics for 30 days
+    "max_memory_entries": 10000      # Maximum in-memory metric entries
 }
 
-# Initialize database manager with config store
-db_manager = DatabaseManager(config_store)
+# Initialize database manager with config instance
+db_manager = DatabaseManager(config_instance)
+
+# Initialize database configuration from environment variables if available
+if all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
+    logger.info("Initializing database configuration from environment variables")
+    config_instance.update_database_config(
+        host=os.getenv("DB_HOST"),
+        database=os.getenv("DB_NAME"),
+        table=os.getenv("DB_TABLE", "proxies"),  # Default table name
+        username=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
+    # Add port if specified
+    if os.getenv("DB_PORT"):
+        config_instance.config["database"]["port"] = int(os.getenv("DB_PORT"))
+    logger.info(f"Database configuration set: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}")
+
+# Initialize enhanced proxy pool and retry manager
+proxy_pool = ProxyPool(db_manager, config_store)
+proxy_retry_manager = EnhancedProxyRetryManager(proxy_pool)
+
+# Initialize metrics collection
+metrics_collector = init_metrics(config_store)
 
 # Models
 class ScrapeRequest(BaseModel):
@@ -113,6 +157,13 @@ async def home(request: Request):
     return templates.TemplateResponse("index.html", {
         "request": request,
         "has_api_key": bool(OPENAI_API_KEY)
+    })
+
+@app.get("/statistics", response_class=HTMLResponse)
+async def statistics_page(request: Request):
+    """Serve the statistics dashboard page"""
+    return templates.TemplateResponse("statistics.html", {
+        "request": request
     })
 
 @app.post("/web/scrape", response_class=HTMLResponse)
@@ -189,10 +240,22 @@ async def web_scrape(
 # API Routes
 @app.get("/api/health")
 async def health_check():
+    # Periodically reset proxy errors for recovery
+    if random.random() < 0.1:  # 10% chance on each health check
+        try:
+            reset_count = db_manager.reset_proxy_errors(max_error_count=2)
+            proxy_pool.reset_failed_proxies()  # Also reset pool's failed proxies
+            logger.info(f"Health check: Reset {reset_count} proxy error counts for recovery")
+        except Exception as e:
+            logger.error(f"Failed to reset proxy errors during health check: {str(e)}")
+    
     return {
         "status": "healthy",
         "platform": platform.system(),
-        "python_version": platform.python_version()
+        "python_version": platform.python_version(),
+        "timestamp": int(time.time()),
+        "circuit_breaker_state": db_manager.circuit_breaker.state,
+        "proxy_pool_size": proxy_pool.available_proxies.qsize()
     }
 
 @app.post("/api/scrape", response_model=ScrapeResponse)
@@ -905,132 +968,205 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
 
 @app.post("/api/scrape/newspaper")
 async def scrape_with_newspaper(request: ScrapeRequest):
-    """Scrape using Newspaper4k with optional proxy support"""
+    """Scrape using Newspaper4k with enhanced proxy pool support and retry logic"""
+    start_time = time.time()
+    url = str(request.url)
+    request_id = str(uuid.uuid4())  # Unique ID for this request
+    selected_proxy = None
+    error_type = None
+    content_length = 0
+    attempt_count = 0
+    
     try:
-        url = str(request.url)
-        logger.info(f"Received Newspaper scrape request for URL: {url}")
+        logger.info(f"Received Newspaper scrape request for URL: {url} (request_id: {request_id})")
         
         # Check if proxy should be used
         use_proxy = request.use_proxy or config_store.get("proxy_enabled", False)
-        selected_proxy = None
-        proxy_id = None
+        max_retries = config_store.get("proxy_retry_count", 3)
+        request_timeout = config_store.get("request_timeout", 15)
         
-        if use_proxy and config_store["database"]:
-            # Get a proxy from the database
-            proxies = db_manager.get_proxies(count=1)
-            if proxies:
-                selected_proxy = proxies[0]
-                proxy_id = selected_proxy["id"]
-                logger.info(f"Using proxy {proxy_id}: {selected_proxy['address']}:{selected_proxy['port']}")
-            else:
-                logger.warning("Proxy requested but no proxies available, proceeding without proxy")
-        
-        # Define the scraping function to run in thread pool
+        # Define the scraping function with enhanced retry logic
         def run_newspaper_scraper():
-            try:
-                # Prepare request configuration
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                }
-                
-                # Configure proxy if available
-                proxies = None
-                if selected_proxy:
-                    # Build proxy URL with authentication embedded
-                    if selected_proxy.get('username') and selected_proxy.get('password'):
-                        # URL-encode credentials to handle special characters
-                        username = quote(selected_proxy['username'], safe='')
-                        password = quote(selected_proxy['password'], safe='')
-                        proxy_address = f"{selected_proxy['type']}://{username}:{password}@{selected_proxy['address']}:{selected_proxy['port']}"
-                        logger.info(f"Using authenticated proxy for newspaper4k: {selected_proxy['username']}:***@{selected_proxy['address']}:{selected_proxy['port']}")
-                    else:
-                        # No authentication
-                        proxy_address = f"{selected_proxy['type']}://{selected_proxy['address']}:{selected_proxy['port']}"
-                        logger.info(f"Using proxy for newspaper4k (no auth): {selected_proxy['address']}:{selected_proxy['port']}")
+            nonlocal selected_proxy, error_type, content_length, attempt_count
+            
+            last_error = None
+            
+            for attempt in range(max_retries + 1):  # +1 for no-proxy fallback
+                attempt_count = attempt + 1
+                try:
+                    # Determine if we should use proxy on this attempt
+                    use_proxy_this_attempt = use_proxy and attempt < max_retries
                     
-                    proxies = {
-                        'http': proxy_address,
-                        'https': proxy_address
+                    if use_proxy_this_attempt and config_store["database"]:
+                        # Get a proxy from the pool for this specific request
+                        selected_proxy = proxy_retry_manager.get_proxy_for_request(request_id)
+                        if selected_proxy:
+                            logger.info(f"Attempt {attempt + 1}: Using proxy {selected_proxy.id}: {selected_proxy.address}:{selected_proxy.port}")
+                        else:
+                            logger.warning(f"Attempt {attempt + 1}: No proxies available, proceeding without proxy")
+                            use_proxy_this_attempt = False
+                    else:
+                        if attempt == max_retries:
+                            logger.info(f"Attempt {attempt + 1}: Fallback to direct connection (no proxy)")
+                        selected_proxy = None
+                    
+                    # Prepare request configuration
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Cache-Control': 'max-age=0'
                     }
-                
-                # Make the request manually with or without proxy
-                logger.debug(f"Fetching URL: {url}")
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    proxies=proxies,
-                    timeout=30,
-                    allow_redirects=True,
-                    verify=True
-                )
-                response.raise_for_status()
-                
-                logger.debug(f"Successfully fetched content, status: {response.status_code}, size: {len(response.content)} bytes")
-                
-                # Create article and set the HTML content
-                article = Article(url)
-                article.download(input_html=response.text)
-                article.parse()
-                
-                # Update proxy success if used
-                if proxy_id:
-                    db_manager.update_proxy_last_used(proxy_id)
-                    logger.debug(f"Updated last_used for proxy {proxy_id}")
-                
-                # Standardize output to match ScrapGraph AI format
-                result = {
-                    "content": article.text,
-                    "top_image": article.top_image,
-                    "published": article.publish_date.isoformat() if article.publish_date else None
-                }
-                
-                logger.debug(f"Parsed article: content_length={len(result['content'])}, has_image={bool(result['top_image'])}, has_date={bool(result['published'])}")
-                return result
-                
-            except requests.exceptions.ProxyError as e:
-                error_msg = f"Proxy error: {str(e)}"
-                logger.error(error_msg)
-                if proxy_id and selected_proxy:
-                    logger.warning(f"Proxy {proxy_id} failed, incrementing error count")
-                    db_manager.increment_proxy_error(proxy_id)
-                raise Exception(error_msg)
-                
-            except requests.exceptions.Timeout as e:
-                error_msg = f"Request timeout: {str(e)}"
-                logger.error(error_msg)
-                if proxy_id and selected_proxy:
-                    logger.warning(f"Proxy {proxy_id} timeout, incrementing error count")
-                    db_manager.increment_proxy_error(proxy_id)
-                raise Exception(error_msg)
-                
-            except requests.exceptions.RequestException as e:
-                error_msg = f"Request failed: {str(e)}"
-                logger.error(error_msg)
-                if proxy_id and selected_proxy:
-                    logger.warning(f"Request failed with proxy {proxy_id}, incrementing error count")
-                    db_manager.increment_proxy_error(proxy_id)
-                raise Exception(error_msg)
-                
-            except Exception as e:
-                error_msg = f"Scraping failed: {str(e)}"
-                logger.error(error_msg)
-                if proxy_id and selected_proxy:
-                    logger.warning(f"Scraping failed with proxy {proxy_id}, incrementing error count")
-                    db_manager.increment_proxy_error(proxy_id)
-                raise Exception(error_msg)
+                    
+                    # Configure proxy if available
+                    proxies = None
+                    if selected_proxy and use_proxy_this_attempt:
+                        proxies = {
+                            'http': selected_proxy.proxy_url,
+                            'https': selected_proxy.proxy_url
+                        }
+                        logger.debug(f"Using proxy URL: {selected_proxy.address}:{selected_proxy.port}")
+                    
+                    # Make the request with timeout and retries
+                    logger.debug(f"Fetching URL: {url}")
+                    
+                    # Session for connection reuse
+                    session = requests.Session()
+                    session.headers.update(headers)
+                    
+                    response = session.get(
+                        url,
+                        proxies=proxies,
+                        timeout=request_timeout,
+                        allow_redirects=True,
+                        verify=True
+                    )
+                    response.raise_for_status()
+                    
+                    content_length = len(response.content)
+                    logger.debug(f"Successfully fetched content, status: {response.status_code}, size: {content_length} bytes")
+                    
+                    # Create article and set the HTML content
+                    article = Article(url)
+                    article.download(input_html=response.text)
+                    article.parse()
+                    
+                    # Mark proxy as successful if used
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_success_for_request(request_id, selected_proxy)
+                        logger.debug(f"Marked proxy {selected_proxy.id} as successful for request {request_id}")
+                    
+                    # Standardize output to match ScrapGraph AI format
+                    result = {
+                        "content": article.text if article.text else "",
+                        "top_image": article.top_image,
+                        "published": article.publish_date.isoformat() if article.publish_date else None,
+                        "title": article.title if hasattr(article, 'title') else None,
+                        "authors": list(article.authors) if hasattr(article, 'authors') else [],
+                        "summary": article.summary if hasattr(article, 'summary') else None
+                    }
+                    
+                    logger.info(f"Successfully scraped article: content_length={len(result['content'])}, title='{result.get('title', 'N/A')[:50]}...', attempt={attempt + 1}")
+                    return result
+                    
+                except requests.exceptions.ProxyError as e:
+                    last_error = f"Proxy error: {str(e)}"
+                    error_type = "ProxyError"
+                    logger.warning(f"Attempt {attempt + 1} - Proxy error: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                        logger.warning(f"Marked proxy {selected_proxy.id} as failed for request {request_id}")
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    # Short delay before retry
+                    time.sleep(0.5 * (attempt + 1))
+                    
+                except requests.exceptions.Timeout as e:
+                    last_error = f"Request timeout after {request_timeout}s: {str(e)}"
+                    error_type = "Timeout"
+                    logger.warning(f"Attempt {attempt + 1} - Timeout: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+                    
+                except requests.exceptions.ConnectionError as e:
+                    last_error = f"Connection error: {str(e)}"
+                    error_type = "ConnectionError"
+                    logger.warning(f"Attempt {attempt + 1} - Connection error: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+                    
+                except requests.exceptions.HTTPError as e:
+                    last_error = f"HTTP error: {str(e)}"
+                    error_type = "HTTPError"
+                    logger.warning(f"Attempt {attempt + 1} - HTTP error: {str(e)}")
+                    
+                    # Don't retry on 4xx errors (client errors)
+                    if response.status_code >= 400 and response.status_code < 500:
+                        raise Exception(last_error)
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+                    
+                except Exception as e:
+                    last_error = f"Scraping failed: {str(e)}"
+                    error_type = "UnknownError"
+                    logger.warning(f"Attempt {attempt + 1} - Unexpected error: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+            
+            # If we get here, all attempts failed
+            raise Exception(f"All {max_retries + 1} attempts failed. Last error: {last_error}")
         
         # Run the scraper in a thread pool
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(thread_pool, run_newspaper_scraper)
         
-        proxy_info = None
-        if selected_proxy:
-            proxy_info = f"{selected_proxy['address']}:{selected_proxy['port']}"
+        # Record successful metrics
+        duration = time.time() - start_time
+        proxy_info = f"{selected_proxy.address}:{selected_proxy.port}" if selected_proxy else None
+        
+        record_request_metric(
+            url=url,
+            method="newspaper",
+            success=True,
+            duration=duration,
+            proxy_used=proxy_info,
+            content_length=len(result.get('content', '')),
+            attempt_count=attempt_count,
+            request_id=request_id
+        )
         
         return ScrapeResponse(
             url=url,
@@ -1040,14 +1176,153 @@ async def scrape_with_newspaper(request: ScrapeRequest):
         )
         
     except Exception as e:
-        logger.error(f"Newspaper scraping failed: {str(e)}")
+        # Record failed metrics
+        duration = time.time() - start_time
+        proxy_info = f"{selected_proxy.address}:{selected_proxy.port}" if selected_proxy else None
+        
+        record_request_metric(
+            url=url,
+            method="newspaper",
+            success=False,
+            duration=duration,
+            proxy_used=proxy_info,
+            error_type=error_type or "UnknownError",
+            content_length=content_length,
+            attempt_count=attempt_count,
+            request_id=request_id
+        )
+        
+        logger.error(f"Newspaper scraping failed completely: {str(e)}")
         return ScrapeResponse(
             url=str(request.url),
             content={},
             status="error",
             error=str(e),
-            proxy_used=f"{selected_proxy['address']}:{selected_proxy['port']}" if selected_proxy else None
+            proxy_used=proxy_info
         )
+
+# Add metrics endpoints
+@app.get("/api/metrics/current")
+async def get_current_metrics():
+    """Get current real-time metrics"""
+    try:
+        if metrics_collector:
+            return metrics_collector.get_current_stats()
+        else:
+            return {"error": "Metrics not initialized"}
+    except Exception as e:
+        logger.error(f"Failed to get current metrics: {str(e)}")
+        return {"error": str(e)}
+
+@app.get("/api/metrics/historical")
+async def get_historical_metrics(days: int = 7):
+    """Get historical metrics for specified number of days"""
+    try:
+        if metrics_collector:
+            return metrics_collector.get_historical_stats(days=days)
+        else:
+            return {"error": "Metrics not initialized"}
+    except Exception as e:
+        logger.error(f"Failed to get historical metrics: {str(e)}")
+        return {"error": str(e)}
+
+@app.get("/api/metrics/export")
+async def export_metrics():
+    """Export all metrics data"""
+    try:
+        if metrics_collector:
+            return {
+                "data": metrics_collector.export_metrics(),
+                "timestamp": time.time()
+            }
+        else:
+            return {"error": "Metrics not initialized"}
+    except Exception as e:
+        logger.error(f"Failed to export metrics: {str(e)}")
+        return {"error": str(e)}
+
+# Enhanced service stats endpoint with proxy pool information
+@app.get("/api/service/stats")
+async def get_service_stats():
+    """Get comprehensive service statistics including proxy pool"""
+    try:
+        # Get proxy stats from database
+        proxy_stats = db_manager.get_proxy_stats()
+        
+        # Get proxy pool stats
+        pool_stats = proxy_pool.get_pool_stats()
+        
+        # Get circuit breaker status
+        circuit_breaker_status = {
+            "state": db_manager.circuit_breaker.state,
+            "failure_count": db_manager.circuit_breaker.failure_count,
+            "last_failure_time": db_manager.circuit_breaker.last_failure_time
+        }
+        
+        return {
+            "timestamp": int(time.time()),
+            "proxy_stats": proxy_stats,
+            "proxy_pool_stats": pool_stats,
+            "circuit_breaker": circuit_breaker_status,
+            "config": {
+                "proxy_enabled": config_store.get("proxy_enabled", False),
+                "proxy_retry_count": config_store.get("proxy_retry_count", 3),
+                "request_timeout": config_store.get("request_timeout", 15),
+                "proxy_pool_size": config_store.get("proxy_pool_size", 50),
+                "min_proxy_pool_size": config_store.get("min_proxy_pool_size", 10)
+            },
+            "active_requests": len(proxy_retry_manager.request_failed_proxies)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get service stats: {str(e)}")
+        return {"error": str(e), "timestamp": int(time.time())}
+
+# Enhanced proxy reset endpoint
+@app.post("/api/service/reset-proxies")
+async def reset_proxy_errors():
+    """Manually reset proxy error counts and refresh pool"""
+    try:
+        # Reset database proxy errors
+        reset_count = db_manager.reset_proxy_errors(max_error_count=2)
+        
+        # Reset proxy pool failed proxies
+        pool_reset_count = proxy_pool.reset_failed_proxies()
+        
+        # Force refresh the proxy pool
+        proxy_pool.force_refresh()
+        
+        # Clean up request tracking
+        proxy_retry_manager.cleanup_old_requests()
+        
+        return {
+            "status": "success",
+            "db_reset_count": reset_count,
+            "pool_reset_count": pool_reset_count,
+            "message": f"Reset {reset_count} proxy error counts and {pool_reset_count} pool failures"
+        }
+    except Exception as e:
+        logger.error(f"Failed to reset proxy errors: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+# New endpoint for proxy pool management
+@app.get("/api/proxy/pool/stats")
+async def get_proxy_pool_stats():
+    """Get detailed proxy pool statistics"""
+    try:
+        return proxy_pool.get_pool_stats()
+    except Exception as e:
+        logger.error(f"Failed to get proxy pool stats: {str(e)}")
+        return {"error": str(e)}
+
+@app.post("/api/proxy/pool/refresh")
+async def refresh_proxy_pool():
+    """Force refresh the proxy pool"""
+    try:
+        proxy_pool.force_refresh()
+        return {"status": "success", "message": "Proxy pool refresh triggered"}
+    except Exception as e:
+        logger.error(f"Failed to refresh proxy pool: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebScraper API - Statistics</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/index.min.js"></script>
+    <style>
+        .metric-card {
+            transition: transform 0.2s;
+        }
+        .metric-card:hover {
+            transform: translateY(-2px);
+        }
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        .metric-label {
+            font-size: 0.9rem;
+            color: #6c757d;
+        }
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin: 20px 0;
+        }
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-good { background-color: #28a745; }
+        .status-warning { background-color: #ffc107; }
+        .status-error { background-color: #dc3545; }
+        .auto-refresh {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+        }
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-chart-line me-2"></i>WebScraper Statistics
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/">
+                    <i class="fas fa-home me-1"></i>Home
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Auto-refresh controls -->
+    <div class="auto-refresh">
+        <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+            <label class="form-check-label" for="autoRefresh">
+                Auto-refresh <span id="refreshTimer">30s</span>
+            </label>
+        </div>
+    </div>
+
+    <div class="container mt-4">
+        <!-- Real-time Metrics Dashboard -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h2><i class="fas fa-tachometer-alt me-2"></i>Real-time Metrics</h2>
+                <div id="lastUpdated" class="text-muted small mb-3"></div>
+            </div>
+        </div>
+
+        <!-- Key Performance Indicators -->
+        <div class="row mb-4" id="kpiCards">
+            <!-- KPI cards will be dynamically generated -->
+        </div>
+
+        <!-- Charts Row -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-clock me-2"></i>Response Time Distribution</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="responseTimeChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-percentage me-2"></i>Success Rate Trend</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="successRateChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Daily Statistics -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-calendar-day me-2"></i>Today's Hourly Breakdown</h5>
+                        <select id="historicalDays" class="form-select" style="width: auto;">
+                            <option value="1">Today</option>
+                            <option value="7" selected>Last 7 days</option>
+                            <option value="30">Last 30 days</option>
+                        </select>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container" style="height: 400px;">
+                            <canvas id="dailyChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed Statistics Tables -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-network-wired me-2"></i>Proxy Usage</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="proxyUsageTable">
+                            <!-- Table will be populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-exclamation-triangle me-2"></i>Error Analysis</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="errorAnalysisTable">
+                            <!-- Table will be populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Health -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-heart me-2"></i>System Health</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row" id="systemHealth">
+                            <!-- Health indicators will be populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Export Controls -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-download me-2"></i>Export Data</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="btn-group" role="group">
+                            <button type="button" class="btn btn-outline-primary" onclick="exportMetrics('json')">
+                                <i class="fas fa-file-code me-1"></i>Export JSON
+                            </button>
+                            <button type="button" class="btn btn-outline-success" onclick="exportMetrics('csv')">
+                                <i class="fas fa-file-csv me-1"></i>Export CSV
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loadingOverlay" class="loading-overlay d-none">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Global variables
+        let refreshInterval;
+        let refreshCounter = 30;
+        let charts = {};
+
+        // Initialize the dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            loadMetrics();
+            setupAutoRefresh();
+            setupEventListeners();
+        });
+
+        function setupEventListeners() {
+            document.getElementById('autoRefresh').addEventListener('change', function() {
+                if (this.checked) {
+                    setupAutoRefresh();
+                } else {
+                    clearInterval(refreshInterval);
+                }
+            });
+
+            document.getElementById('historicalDays').addEventListener('change', function() {
+                loadHistoricalData(this.value);
+            });
+        }
+
+        function setupAutoRefresh() {
+            clearInterval(refreshInterval);
+            refreshCounter = 30;
+            
+            refreshInterval = setInterval(() => {
+                refreshCounter--;
+                document.getElementById('refreshTimer').textContent = refreshCounter + 's';
+                
+                if (refreshCounter <= 0) {
+                    loadMetrics();
+                    refreshCounter = 30;
+                }
+            }, 1000);
+        }
+
+        async function loadMetrics() {
+            try {
+                showLoading(true);
+                
+                // Load current metrics
+                const currentResponse = await fetch('/api/metrics/current');
+                const currentData = await currentResponse.json();
+                
+                if (currentData.error) {
+                    throw new Error(currentData.error);
+                }
+                
+                updateKPIs(currentData);
+                updateCharts(currentData);
+                updateTables(currentData);
+                updateSystemHealth(currentData);
+                
+                // Load historical data
+                const days = document.getElementById('historicalDays').value;
+                await loadHistoricalData(days);
+                
+                // Update last updated timestamp
+                document.getElementById('lastUpdated').textContent = 
+                    'Last updated: ' + new Date().toLocaleString();
+                    
+            } catch (error) {
+                console.error('Error loading metrics:', error);
+                showError('Failed to load metrics: ' + error.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        async function loadHistoricalData(days) {
+            try {
+                const response = await fetch(`/api/metrics/historical?days=${days}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                updateDailyChart(data);
+                
+            } catch (error) {
+                console.error('Error loading historical data:', error);
+            }
+        }
+
+        function updateKPIs(data) {
+            const kpiContainer = document.getElementById('kpiCards');
+            
+            const kpis = [
+                {
+                    title: 'Total Requests',
+                    value: data.counters.total_requests || 0,
+                    icon: 'fas fa-globe',
+                    color: 'primary'
+                },
+                {
+                    title: 'Success Rate',
+                    value: data.counters.total_requests > 0 ? 
+                        ((data.counters.successful_requests / data.counters.total_requests) * 100).toFixed(1) + '%' : '0%',
+                    icon: 'fas fa-check-circle',
+                    color: 'success'
+                },
+                {
+                    title: 'Avg Response Time',
+                    value: data.response_times.avg ? data.response_times.avg.toFixed(2) + 's' : '0s',
+                    icon: 'fas fa-clock',
+                    color: 'info'
+                },
+                {
+                    title: 'Proxy Usage',
+                    value: data.recent_hour.proxy_usage ? data.recent_hour.proxy_usage.toFixed(1) + '%' : '0%',
+                    icon: 'fas fa-network-wired',
+                    color: 'warning'
+                },
+                {
+                    title: 'Recent Hour Requests',
+                    value: data.recent_hour.requests || 0,
+                    icon: 'fas fa-chart-line',
+                    color: 'secondary'
+                },
+                {
+                    title: 'Memory Usage',
+                    value: `${data.memory_usage.recent_requests_count}/${data.memory_usage.max_memory_entries}`,
+                    icon: 'fas fa-memory',
+                    color: 'dark'
+                }
+            ];
+
+            kpiContainer.innerHTML = kpis.map(kpi => `
+                <div class="col-md-4 col-lg-2 mb-3">
+                    <div class="card metric-card border-${kpi.color}">
+                        <div class="card-body text-center">
+                            <i class="${kpi.icon} text-${kpi.color} fa-2x mb-2"></i>
+                            <div class="metric-value text-${kpi.color}">${kpi.value}</div>
+                            <div class="metric-label">${kpi.title}</div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateCharts(data) {
+            // Response Time Distribution Chart
+            updateResponseTimeChart(data.response_times);
+            
+            // Success Rate Chart (if we have recent data)
+            updateSuccessRateChart(data.recent_hour);
+        }
+
+        function updateResponseTimeChart(responseTimeData) {
+            const ctx = document.getElementById('responseTimeChart').getContext('2d');
+            
+            if (charts.responseTime) {
+                charts.responseTime.destroy();
+            }
+
+            const labels = ['Min', 'Median', 'Average', 'P95', 'P99', 'Max'];
+            const values = [
+                responseTimeData.min || 0,
+                responseTimeData.median || 0,
+                responseTimeData.avg || 0,
+                responseTimeData.p95 || 0,
+                responseTimeData.p99 || 0,
+                responseTimeData.max || 0
+            ];
+
+            charts.responseTime = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Response Time (seconds)',
+                        data: values,
+                        backgroundColor: [
+                            'rgba(54, 162, 235, 0.7)',
+                            'rgba(75, 192, 192, 0.7)',
+                            'rgba(255, 205, 86, 0.7)',
+                            'rgba(255, 159, 64, 0.7)',
+                            'rgba(255, 99, 132, 0.7)',
+                            'rgba(153, 102, 255, 0.7)'
+                        ],
+                        borderColor: [
+                            'rgba(54, 162, 235, 1)',
+                            'rgba(75, 192, 192, 1)',
+                            'rgba(255, 205, 86, 1)',
+                            'rgba(255, 159, 64, 1)',
+                            'rgba(255, 99, 132, 1)',
+                            'rgba(153, 102, 255, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Time (seconds)'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateSuccessRateChart(recentData) {
+            const ctx = document.getElementById('successRateChart').getContext('2d');
+            
+            if (charts.successRate) {
+                charts.successRate.destroy();
+            }
+
+            const successRate = recentData.success_rate || 0;
+            const failureRate = 100 - successRate;
+
+            charts.successRate = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Success', 'Failure'],
+                    datasets: [{
+                        data: [successRate, failureRate],
+                        backgroundColor: [
+                            'rgba(40, 167, 69, 0.8)',
+                            'rgba(220, 53, 69, 0.8)'
+                        ],
+                        borderColor: [
+                            'rgba(40, 167, 69, 1)',
+                            'rgba(220, 53, 69, 1)'
+                        ],
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateDailyChart(data) {
+            const ctx = document.getElementById('dailyChart').getContext('2d');
+            
+            if (charts.daily) {
+                charts.daily.destroy();
+            }
+
+            let chartData;
+            let labels;
+
+            if (data.daily_stats && data.daily_stats.length > 0) {
+                // Historical daily data
+                labels = data.daily_stats.map(d => d.date);
+                chartData = {
+                    labels: labels.reverse(),
+                    datasets: [{
+                        label: 'Total Requests',
+                        data: data.daily_stats.reverse().map(d => d.total_requests),
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                        yAxisID: 'y'
+                    }, {
+                        label: 'Success Rate (%)',
+                        data: data.daily_stats.map(d => d.success_rate),
+                        borderColor: 'rgba(40, 167, 69, 1)',
+                        backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                        yAxisID: 'y1'
+                    }]
+                };
+            } else if (data.hourly_today && data.hourly_today.length > 0) {
+                // Today's hourly data
+                labels = data.hourly_today.map(h => h.hour + ':00');
+                chartData = {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Hourly Requests',
+                        data: data.hourly_today.map(h => h.requests),
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                        yAxisID: 'y'
+                    }, {
+                        label: 'Success Rate (%)',
+                        data: data.hourly_today.map(h => h.success_rate),
+                        borderColor: 'rgba(40, 167, 69, 1)',
+                        backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                        yAxisID: 'y1'
+                    }]
+                };
+            } else {
+                // No data available
+                chartData = {
+                    labels: [],
+                    datasets: []
+                };
+            }
+
+            charts.daily = new Chart(ctx, {
+                type: 'line',
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'Requests'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Success Rate (%)'
+                            },
+                            grid: {
+                                drawOnChartArea: false,
+                            },
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateTables(data) {
+            // Proxy Usage Table
+            const proxyUsage = data.daily_stats.proxy_usage || {};
+            const proxyTableHtml = Object.keys(proxyUsage).length > 0 ? `
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Proxy</th>
+                                <th>Usage Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${Object.entries(proxyUsage)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([proxy, count]) => `
+                                    <tr>
+                                        <td><code>${proxy}</code></td>
+                                        <td><span class="badge bg-primary">${count}</span></td>
+                                    </tr>
+                                `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            ` : '<p class="text-muted">No proxy usage data available</p>';
+            
+            document.getElementById('proxyUsageTable').innerHTML = proxyTableHtml;
+
+            // Error Analysis Table
+            const errorTypes = data.daily_stats.error_types || {};
+            const errorTableHtml = Object.keys(errorTypes).length > 0 ? `
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>Error Type</th>
+                                <th>Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${Object.entries(errorTypes)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([error, count]) => `
+                                    <tr>
+                                        <td><code>${error}</code></td>
+                                        <td><span class="badge bg-danger">${count}</span></td>
+                                    </tr>
+                                `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            ` : '<p class="text-muted">No errors recorded today</p>';
+            
+            document.getElementById('errorAnalysisTable').innerHTML = errorTableHtml;
+        }
+
+        function updateSystemHealth(data) {
+            const healthContainer = document.getElementById('systemHealth');
+            
+            const memoryUsage = (data.memory_usage.recent_requests_count / data.memory_usage.max_memory_entries) * 100;
+            const successRate = data.counters.total_requests > 0 ? 
+                (data.counters.successful_requests / data.counters.total_requests) * 100 : 100;
+            
+            const healthItems = [
+                {
+                    label: 'Memory Usage',
+                    value: memoryUsage.toFixed(1) + '%',
+                    status: memoryUsage < 80 ? 'good' : memoryUsage < 95 ? 'warning' : 'error'
+                },
+                {
+                    label: 'Success Rate',
+                    value: successRate.toFixed(1) + '%',
+                    status: successRate > 90 ? 'good' : successRate > 70 ? 'warning' : 'error'
+                },
+                {
+                    label: 'Total Requests',
+                    value: data.counters.total_requests || 0,
+                    status: 'good'
+                }
+            ];
+
+            healthContainer.innerHTML = healthItems.map(item => `
+                <div class="col-md-4 mb-3">
+                    <div class="d-flex align-items-center">
+                        <span class="status-indicator status-${item.status}"></span>
+                        <div>
+                            <div class="fw-bold">${item.value}</div>
+                            <div class="text-muted small">${item.label}</div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function exportMetrics(format) {
+            try {
+                if (format === 'json') {
+                    const response = await fetch('/api/metrics/export');
+                    const data = await response.json();
+                    
+                    const blob = new Blob([data.data], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `metrics-${new Date().toISOString().split('T')[0]}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                } else if (format === 'csv') {
+                    // CSV export would require additional processing
+                    alert('CSV export not implemented yet');
+                }
+            } catch (error) {
+                console.error('Export failed:', error);
+                showError('Export failed: ' + error.message);
+            }
+        }
+
+        function showLoading(show) {
+            document.getElementById('loadingOverlay').classList.toggle('d-none', !show);
+        }
+
+        function showError(message) {
+            const alertHtml = `
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    <i class="fas fa-exclamation-triangle me-2"></i>${message}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            `;
+            
+            document.querySelector('.container').insertAdjacentHTML('afterbegin', alertHtml);
+        }
+    </script>
+</body>
+</html> 

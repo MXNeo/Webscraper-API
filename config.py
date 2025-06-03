@@ -2,9 +2,55 @@ import os
 import json
 from cryptography.fernet import Fernet
 from typing import Dict, Optional, Any
+from dotenv import load_dotenv
 
 class Config:
+    """Enhanced configuration management with stability settings"""
+    
     def __init__(self):
+        # Load environment variables
+        load_dotenv()
+        
+        # Stability and Performance Settings
+        self.PROXY_RETRY_COUNT = int(os.getenv("PROXY_RETRY_COUNT", "3"))
+        self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))  # Reduced from 30
+        self.CONNECTION_TIMEOUT = int(os.getenv("CONNECTION_TIMEOUT", "5"))  # DB connection timeout
+        self.MAX_THREAD_POOL_SIZE = int(os.getenv("MAX_THREAD_POOL_SIZE", "10"))
+        
+        # Circuit Breaker Settings
+        self.CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+        self.CIRCUIT_BREAKER_RECOVERY_TIMEOUT = int(os.getenv("CIRCUIT_BREAKER_RECOVERY_TIMEOUT", "60"))
+        
+        # Database Connection Pool Settings
+        self.DB_POOL_MIN_CONNECTIONS = int(os.getenv("DB_POOL_MIN_CONNECTIONS", "2"))
+        self.DB_POOL_MAX_CONNECTIONS = int(os.getenv("DB_POOL_MAX_CONNECTIONS", "10"))
+        
+        # Proxy Management Settings
+        self.PROXY_ERROR_THRESHOLD = int(os.getenv("PROXY_ERROR_THRESHOLD", "3"))  # Reduced from 5
+        self.PROXY_RECOVERY_PROBABILITY = float(os.getenv("PROXY_RECOVERY_PROBABILITY", "0.1"))  # 10% chance on health check
+        self.PROXY_FETCH_COUNT = int(os.getenv("PROXY_FETCH_COUNT", "10"))  # Number of proxies to fetch for retries
+        
+        # Enhanced Proxy Pool Settings
+        self.PROXY_POOL_SIZE = int(os.getenv("PROXY_POOL_SIZE", "50"))  # Number of proxies to keep in pool
+        self.MIN_PROXY_POOL_SIZE = int(os.getenv("MIN_PROXY_POOL_SIZE", "10"))  # Minimum pool size before refresh
+        self.PROXY_REFRESH_INTERVAL = int(os.getenv("PROXY_REFRESH_INTERVAL", "300"))  # Refresh pool every 5 minutes
+        self.BATCH_UPDATE_INTERVAL = int(os.getenv("BATCH_UPDATE_INTERVAL", "60"))  # Process batch updates every minute
+        
+        # Request Settings
+        self.USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        self.MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", "10485760"))  # 10MB limit
+        self.ENABLE_REQUEST_RETRIES = os.getenv("ENABLE_REQUEST_RETRIES", "true").lower() == "true"
+        
+        # Monitoring and Health Check Settings
+        self.HEALTH_CHECK_PROXY_RESET = os.getenv("HEALTH_CHECK_PROXY_RESET", "true").lower() == "true"
+        self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+        self.ENABLE_DEBUG_LOGS = os.getenv("ENABLE_DEBUG_LOGS", "false").lower() == "true"
+        
+        # Rate Limiting (optional)
+        self.RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "false").lower() == "true"
+        self.RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+        self.RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
+        
         self.config_file = "config.json"
         self.key_file = "secret.key"
         self._ensure_encryption_key()
@@ -293,4 +339,70 @@ class Config:
         """Check if database is configured"""
         db_config = self.config.get("database", {})
         required_fields = ["host", "database", "table", "username", "password"]
-        return all(db_config.get(field) for field in required_fields) 
+        return all(db_config.get(field) for field in required_fields)
+    
+    def get_request_headers(self):
+        """Get enhanced request headers for better success rate"""
+        return {
+            'User-Agent': self.USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+            'DNT': '1'
+        }
+    
+    def get_retry_delays(self):
+        """Get exponential backoff delays for retries"""
+        return [0.5, 1.0, 2.0, 4.0, 8.0]  # seconds
+    
+    def is_retryable_error(self, error):
+        """Determine if an error should trigger a retry"""
+        retryable_errors = [
+            'ProxyError',
+            'ConnectTimeout',
+            'ReadTimeout',
+            'ConnectionError',
+            'ChunkedEncodingError',
+            'ContentDecodingError'
+        ]
+        
+        error_str = str(error)
+        return any(err in error_str for err in retryable_errors)
+    
+    def get_proxy_selection_strategy(self):
+        """Get proxy selection strategy"""
+        strategy = os.getenv("PROXY_SELECTION_STRATEGY", "round_robin")
+        return strategy  # round_robin, random, least_errors
+    
+    def should_skip_proxy_on_error(self, status_code):
+        """Determine if proxy should be skipped based on HTTP status code"""
+        # Don't use proxies for client errors (4xx)
+        skip_codes = [401, 403, 404, 429]
+        return status_code in skip_codes
+    
+    def get_stability_config(self):
+        """Get all stability-related configuration"""
+        return {
+            "proxy_retry_count": self.PROXY_RETRY_COUNT,
+            "request_timeout": self.REQUEST_TIMEOUT,
+            "connection_timeout": self.CONNECTION_TIMEOUT,
+            "proxy_error_threshold": self.PROXY_ERROR_THRESHOLD,
+            "circuit_breaker_failure_threshold": self.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            "circuit_breaker_recovery_timeout": self.CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
+            "enable_request_retries": self.ENABLE_REQUEST_RETRIES,
+            "proxy_recovery_probability": self.PROXY_RECOVERY_PROBABILITY,
+            "max_thread_pool_size": self.MAX_THREAD_POOL_SIZE,
+            "db_pool_min_connections": self.DB_POOL_MIN_CONNECTIONS,
+            "db_pool_max_connections": self.DB_POOL_MAX_CONNECTIONS,
+            # Enhanced proxy pool settings
+            "proxy_pool_size": self.PROXY_POOL_SIZE,
+            "min_proxy_pool_size": self.MIN_PROXY_POOL_SIZE,
+            "proxy_refresh_interval": self.PROXY_REFRESH_INTERVAL,
+            "batch_update_interval": self.BATCH_UPDATE_INTERVAL
+        } 
