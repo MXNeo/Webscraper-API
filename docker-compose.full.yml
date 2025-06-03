@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  webscraper-api:
+    image: webscraper-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # API Configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      
+      # Pre-configured Database Connection
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=webscraper
+      - DB_USER=webscraper_user
+      - DB_PASSWORD=webscraper_secure_password_2024
+      
+      # Metrics settings (enabled by default)
+      - METRICS_ENABLED=true
+      - PERSIST_METRICS=true
+      - METRICS_DB_PATH=/app/data/metrics.db
+      - MEMORY_RETENTION_HOURS=24
+      - DB_RETENTION_DAYS=30
+      - MAX_MEMORY_ENTRIES=10000
+      
+      # Proxy pool settings
+      - PROXY_POOL_SIZE=50
+      - MIN_PROXY_POOL_SIZE=10
+      - PROXY_REFRESH_INTERVAL=300
+      - BATCH_UPDATE_INTERVAL=60
+      
+      # Deployment mode
+      - DEPLOYMENT_MODE=full
+      - AUTO_DB_SETUP=true
+      - DB_INIT_SAMPLE_DATA=true
+      
+    volumes:
+      # Persistent volumes for data and config
+      - webscraper_data:/app/data
+      - webscraper_config:/app/config
+      - webscraper_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=webscraper
+      - POSTGRES_USER=webscraper_user
+      - POSTGRES_PASSWORD=webscraper_secure_password_2024
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      # Database initialization with proxy table and sample data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init-schema.sql
+      - ./scripts/sample-data.sql:/docker-entrypoint-initdb.d/02-sample-data.sql
+      # Persistent database storage
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webscraper_user -d webscraper"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Optional: Redis for shared state in K8s environments
+  # redis:
+  #   image: redis:7-alpine
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 3
+
+  # Optional: pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@webscraper.local
+      - PGADMIN_DEFAULT_PASSWORD=admin_password_2024
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles:
+      - tools
+
+volumes:
+  # Named volumes for persistence
+  webscraper_data:
+    driver: local
+  webscraper_config:
+    driver: local
+  webscraper_logs:
+    driver: local
+  postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  # redis_data:
+  #   driver: local
+
+networks:
+  default:
+    name: webscraper_full 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi import FastAPI, HTTPException, Request, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -163,6 +163,13 @@ async def home(request: Request):
 async def statistics_page(request: Request):
     """Serve the statistics dashboard page"""
     return templates.TemplateResponse("statistics.html", {
+        "request": request
+    })
+
+@app.get("/proxy-management", response_class=HTMLResponse)
+async def proxy_management_page(request: Request):
+    """Serve the proxy management page"""
+    return templates.TemplateResponse("proxy-management.html", {
         "request": request
     })
 
@@ -1323,6 +1330,460 @@ async def refresh_proxy_pool():
     except Exception as e:
         logger.error(f"Failed to refresh proxy pool: {str(e)}")
         return {"status": "error", "message": str(e)}
+
+# Database Table Management Endpoints
+@app.get("/api/database/table-status")
+async def get_table_status():
+    """Check if the proxies table exists and validate its schema"""
+    try:
+        if not config_instance.get_database_config():
+            return {
+                "table_exists": False,
+                "schema_valid": False,
+                "message": "Database not configured",
+                "missing_columns": [],
+                "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standalone")
+            }
+        
+        # Test database connection first
+        db_test_result, db_test_message = db_manager.test_connection()
+        if not db_test_result:
+            return {
+                "table_exists": False,
+                "schema_valid": False,
+                "message": f"Database connection failed: {db_test_message}",
+                "missing_columns": []
+            }
+        
+        # Check if table exists and validate schema
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if proxies table exists
+            cursor.execute("""
+                SELECT table_name FROM information_schema.tables 
+                WHERE table_name = 'proxies' AND table_schema = 'public'
+            """)
+            table_exists = cursor.fetchone() is not None
+            
+            if not table_exists:
+                cursor.close()
+                return {
+                    "table_exists": False,
+                    "schema_valid": False,
+                    "message": "Proxies table does not exist",
+                    "missing_columns": []
+                }
+            
+            # Validate required columns
+            cursor.execute("""
+                SELECT column_name, data_type, is_nullable 
+                FROM information_schema.columns 
+                WHERE table_name = 'proxies' AND table_schema = 'public'
+                ORDER BY ordinal_position
+            """)
+            existing_columns = {row['column_name']: row for row in cursor.fetchall()}
+            
+            # Required columns for basic functionality
+            required_columns = {
+                'id': 'integer',
+                'address': 'character varying',
+                'port': 'integer',
+                'type': 'character varying',
+                'username': 'character varying',
+                'password': 'character varying',
+                'status': 'character varying',
+                'error_count': 'integer'
+            }
+            
+            # Optional but recommended columns
+            recommended_columns = {
+                'success_count': 'integer',
+                'last_used': 'timestamp without time zone',
+                'last_tested': 'timestamp without time zone',
+                'response_time_ms': 'integer',
+                'country': 'character varying',
+                'provider': 'character varying',
+                'created_at': 'timestamp without time zone',
+                'updated_at': 'timestamp without time zone'
+            }
+            
+            missing_required = []
+            missing_recommended = []
+            
+            for col_name, expected_type in required_columns.items():
+                if col_name not in existing_columns:
+                    missing_required.append(col_name)
+            
+            for col_name, expected_type in recommended_columns.items():
+                if col_name not in existing_columns:
+                    missing_recommended.append(col_name)
+            
+            # Count existing proxies
+            cursor.execute("SELECT COUNT(*) as count FROM proxies")
+            proxy_count = cursor.fetchone()['count']
+            
+            cursor.close()
+            
+            schema_valid = len(missing_required) == 0
+            
+            return {
+                "table_exists": True,
+                "schema_valid": schema_valid,
+                "message": f"Table found with {proxy_count} proxies" if schema_valid else "Table exists but schema incomplete",
+                "missing_required": missing_required,
+                "missing_recommended": missing_recommended,
+                "proxy_count": proxy_count,
+                "existing_columns": list(existing_columns.keys()),
+                "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standalone")
+            }
+            
+    except Exception as e:
+        logger.error(f"Table status check failed: {str(e)}")
+        return {
+            "table_exists": False,
+            "schema_valid": False,
+            "message": f"Error checking table status: {str(e)}",
+            "missing_columns": []
+        }
+
+@app.post("/api/database/create-table")
+async def create_proxies_table():
+    """Create the proxies table with complete schema"""
+    try:
+        if not config_instance.get_database_config():
+            raise HTTPException(status_code=400, detail="Database not configured")
+        
+        # Test database connection first
+        db_test_result, db_test_message = db_manager.test_connection()
+        if not db_test_result:
+            raise HTTPException(status_code=400, detail=f"Database connection failed: {db_test_message}")
+        
+        # Read and execute the init script
+        init_script_path = Path(__file__).parent / "scripts" / "init-db.sql"
+        if not init_script_path.exists():
+            raise HTTPException(status_code=500, detail="Database initialization script not found")
+        
+        with open(init_script_path, 'r', encoding='utf-8') as f:
+            init_script = f.read()
+        
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Execute the initialization script
+            cursor.execute(init_script)
+            conn.commit()
+            cursor.close()
+        
+        # Verify table creation
+        table_status = await get_table_status()
+        
+        return {
+            "success": True,
+            "message": "Proxies table created successfully",
+            "table_status": table_status
+        }
+        
+    except Exception as e:
+        logger.error(f"Table creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create table: {str(e)}")
+
+# Proxy Management Endpoints
+@app.get("/api/proxies")
+async def get_all_proxies(
+    page: int = 1,
+    limit: int = 50,
+    status: str = None,
+    country: str = None,
+    provider: str = None,
+    search: str = None
+):
+    """Get paginated list of all proxies with filtering and search"""
+    try:
+        if not config_instance.get_database_config():
+            raise HTTPException(status_code=400, detail="Database not configured")
+        
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build WHERE clause based on filters
+            where_conditions = []
+            params = []
+            
+            if status:
+                where_conditions.append("status = %s")
+                params.append(status)
+            
+            if country:
+                where_conditions.append("country = %s")
+                params.append(country)
+            
+            if provider:
+                where_conditions.append("provider ILIKE %s")
+                params.append(f"%{provider}%")
+            
+            if search:
+                where_conditions.append("(address ILIKE %s OR notes ILIKE %s OR provider ILIKE %s)")
+                params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+            
+            where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+            
+            # Get total count for pagination
+            count_query = f"SELECT COUNT(*) as total FROM proxy_stats{where_clause}"
+            cursor.execute(count_query, params)
+            total_count = cursor.fetchone()['total']
+            
+            # Get paginated results using the proxy_stats view
+            offset = (page - 1) * limit
+            query = f"""
+                SELECT * FROM proxy_stats 
+                {where_clause}
+                ORDER BY 
+                    CASE 
+                        WHEN health_status = 'good' THEN 1
+                        WHEN health_status = 'warning' THEN 2
+                        ELSE 3
+                    END,
+                    success_rate_percent DESC NULLS LAST,
+                    last_used DESC NULLS LAST
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            
+            cursor.execute(query, params)
+            proxies = cursor.fetchall()
+            
+            # Convert to list of dicts and format for frontend
+            proxy_list = []
+            for proxy in proxies:
+                proxy_dict = dict(proxy)
+                # Format timestamps for display
+                for timestamp_field in ['last_used', 'last_tested', 'created_at', 'updated_at']:
+                    if proxy_dict.get(timestamp_field):
+                        proxy_dict[timestamp_field] = proxy_dict[timestamp_field].isoformat()
+                
+                # Parse tags if they exist
+                if proxy_dict.get('tags'):
+                    try:
+                        proxy_dict['tags_parsed'] = json.loads(proxy_dict['tags'])
+                    except:
+                        proxy_dict['tags_parsed'] = []
+                
+                proxy_list.append(proxy_dict)
+            
+            cursor.close()
+            
+            return {
+                "proxies": proxy_list,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total_count,
+                    "pages": (total_count + limit - 1) // limit
+                },
+                "filters": {
+                    "status": status,
+                    "country": country,
+                    "provider": provider,
+                    "search": search
+                }
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to get proxies: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/proxies/summary")
+async def get_proxy_summary():
+    """Get summary statistics for proxy dashboard"""
+    try:
+        if not config_instance.get_database_config():
+            raise HTTPException(status_code=400, detail="Database not configured")
+        
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get comprehensive summary statistics
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_proxies,
+                    COUNT(CASE WHEN status = 'active' THEN 1 END) as active_proxies,
+                    COUNT(CASE WHEN status = 'inactive' THEN 1 END) as inactive_proxies,
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_proxies,
+                    COUNT(CASE WHEN status = 'testing' THEN 1 END) as testing_proxies,
+                    
+                    -- Health status distribution
+                    COUNT(CASE WHEN status = 'active' AND error_count < 3 THEN 1 END) as healthy_proxies,
+                    COUNT(CASE WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 1 END) as warning_proxies,
+                    COUNT(CASE WHEN error_count >= 5 OR status = 'failed' THEN 1 END) as error_proxies,
+                    
+                    -- Performance statistics
+                    AVG(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as avg_response_time,
+                    MIN(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as min_response_time,
+                    MAX(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as max_response_time,
+                    
+                    -- Usage statistics
+                    COUNT(CASE WHEN last_used >= NOW() - INTERVAL '1 hour' THEN 1 END) as used_last_hour,
+                    COUNT(CASE WHEN last_used >= NOW() - INTERVAL '24 hours' THEN 1 END) as used_last_24h,
+                    COUNT(CASE WHEN last_used >= NOW() - INTERVAL '7 days' THEN 1 END) as used_last_week
+                    
+                FROM proxies
+            """)
+            
+            summary = dict(cursor.fetchone())
+            
+            # Get country distribution
+            cursor.execute("""
+                SELECT country, COUNT(*) as count 
+                FROM proxies 
+                WHERE country IS NOT NULL AND country != 'XX'
+                GROUP BY country 
+                ORDER BY count DESC 
+                LIMIT 10
+            """)
+            country_distribution = [dict(row) for row in cursor.fetchall()]
+            
+            # Get provider distribution
+            cursor.execute("""
+                SELECT provider, COUNT(*) as count 
+                FROM proxies 
+                WHERE provider IS NOT NULL 
+                GROUP BY provider 
+                ORDER BY count DESC 
+                LIMIT 10
+            """)
+            provider_distribution = [dict(row) for row in cursor.fetchall()]
+            
+            # Get proxy type distribution
+            cursor.execute("""
+                SELECT type, COUNT(*) as count 
+                FROM proxies 
+                GROUP BY type 
+                ORDER BY count DESC
+            """)
+            type_distribution = [dict(row) for row in cursor.fetchall()]
+            
+            cursor.close()
+            
+            return {
+                "summary": summary,
+                "distributions": {
+                    "countries": country_distribution,
+                    "providers": provider_distribution,
+                    "types": type_distribution
+                },
+                "timestamp": time.time()
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to get proxy summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# WebSocket Log Management
+class LogManager:
+    def __init__(self):
+        self.connections: List[WebSocket] = []
+        self.log_buffer: List[Dict] = []
+        self.max_buffer_size = 1000
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.connections.append(websocket)
+        
+        # Send recent logs to new connection
+        for log_entry in self.log_buffer[-50:]:  # Last 50 logs
+            await websocket.send_json(log_entry)
+    
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.connections:
+            self.connections.remove(websocket)
+    
+    async def broadcast_log(self, log_entry: Dict):
+        """Broadcast log entry to all connected clients"""
+        # Add to buffer
+        self.log_buffer.append(log_entry)
+        if len(self.log_buffer) > self.max_buffer_size:
+            self.log_buffer = self.log_buffer[-self.max_buffer_size:]
+        
+        # Broadcast to all connections
+        disconnected = []
+        for connection in self.connections:
+            try:
+                await connection.send_json(log_entry)
+            except:
+                disconnected.append(connection)
+        
+        # Clean up disconnected clients
+        for connection in disconnected:
+            self.disconnect(connection)
+
+# Initialize log manager
+log_manager = LogManager()
+
+# Custom log handler for WebSocket streaming
+class WebSocketLogHandler(logging.Handler):
+    def __init__(self, log_manager):
+        super().__init__()
+        self.log_manager = log_manager
+    
+    def emit(self, record):
+        try:
+            log_entry = {
+                "timestamp": record.created,
+                "level": record.levelname,
+                "module": record.name,
+                "message": record.getMessage(),
+                "timestamp_iso": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(record.created))
+            }
+            
+            # Add extra fields if available
+            if hasattr(record, 'request_id'):
+                log_entry['request_id'] = record.request_id
+            
+            # Send to WebSocket clients (non-blocking)
+            asyncio.create_task(self.log_manager.broadcast_log(log_entry))
+        except:
+            pass  # Don't let logging errors break the application
+
+# Add WebSocket handler to root logger
+websocket_handler = WebSocketLogHandler(log_manager)
+websocket_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(websocket_handler)
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """WebSocket endpoint for live log streaming"""
+    await log_manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive and listen for client messages
+            message = await websocket.receive_text()
+            
+            # Handle client commands (like filtering)
+            try:
+                command = json.loads(message)
+                if command.get("type") == "filter":
+                    # TODO: Implement log filtering
+                    pass
+            except json.JSONDecodeError:
+                pass
+            
+    except WebSocketDisconnect:
+        log_manager.disconnect(websocket)
+
+@app.get("/api/deployment/info")
+async def get_deployment_info():
+    """Get deployment mode and configuration information"""
+    return {
+        "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standalone"),
+        "auto_db_setup": os.getenv("AUTO_DB_SETUP", "false").lower() == "true",
+        "db_init_sample_data": os.getenv("DB_INIT_SAMPLE_DATA", "false").lower() == "true",
+        "metrics_enabled": config_store.get("metrics_enabled", True),
+        "proxy_enabled": config_store.get("proxy_enabled", False),
+        "platform": platform.system(),
+        "container_id": os.getenv("HOSTNAME", "unknown"),
+        "version": "1.0.0"
+    }
 
 if __name__ == "__main__":
     import uvicorn

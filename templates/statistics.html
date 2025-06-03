@@ -59,15 +59,15 @@
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container">
             <a class="navbar-brand" href="/">
-                <i class="fas fa-chart-line me-2"></i>WebScraper Statistics
+                <i class="fas fa-spider me-2"></i>WebScraper API
             </a>
             <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="/">
-                    <i class="fas fa-home me-1"></i>Home
-                </a>
+                <a class="nav-link" href="/"><i class="fas fa-home me-1"></i>Home</a>
+                <a class="nav-link active" href="/statistics"><i class="fas fa-chart-line me-1"></i>Statistics</a>
+                <a class="nav-link" href="/proxy-management"><i class="fas fa-network-wired me-1"></i>Proxies</a>
             </div>
         </div>
     </nav>
@@ -189,6 +189,65 @@
             </div>
         </div>
 
+        <!-- Live Logs Section -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-terminal me-2"></i>Live Logs</h5>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-primary" id="toggleLogs" onclick="toggleLogs()">
+                                <i class="fas fa-play me-1"></i>Start
+                            </button>
+                            <button class="btn btn-outline-secondary" onclick="clearLogs()">
+                                <i class="fas fa-trash me-1"></i>Clear
+                            </button>
+                            <button class="btn btn-outline-info" onclick="toggleAutoScroll()">
+                                <i class="fas fa-arrows-alt-v me-1"></i>Auto-scroll
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <!-- Log Controls -->
+                        <div class="row mb-3">
+                            <div class="col-md-4">
+                                <label class="form-label">Log Level</label>
+                                <select class="form-select form-select-sm" id="logLevelFilter">
+                                    <option value="">All Levels</option>
+                                    <option value="DEBUG">Debug</option>
+                                    <option value="INFO">Info</option>
+                                    <option value="WARNING">Warning</option>
+                                    <option value="ERROR">Error</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Module</label>
+                                <input type="text" class="form-control form-control-sm" id="moduleFilter" placeholder="Filter by module">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Search</label>
+                                <input type="text" class="form-control form-control-sm" id="logSearchFilter" placeholder="Search log messages">
+                            </div>
+                        </div>
+                        
+                        <!-- Connection Status -->
+                        <div class="mb-2">
+                            <span id="logConnectionStatus" class="badge bg-secondary">Disconnected</span>
+                            <span id="logCount" class="text-muted small ms-2">0 logs</span>
+                        </div>
+                        
+                        <!-- Log Container -->
+                        <div id="logContainer" style="height: 400px; overflow-y: auto; background: #1e1e1e; color: #fff; font-family: 'Courier New', monospace; font-size: 0.85rem; padding: 10px; border-radius: 4px;">
+                            <div class="text-muted text-center">
+                                <i class="fas fa-info-circle me-1"></i>
+                                Click "Start" to begin live log streaming
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Export Controls -->
         <div class="row mb-4">
             <div class="col-12">
@@ -225,11 +284,23 @@
         let refreshCounter = 30;
         let charts = {};
 
+        // Live Logs WebSocket Management
+        let logWebSocket = null;
+        let logBuffer = [];
+        let autoScroll = true;
+        let logCount = 0;
+        let logFilters = {
+            level: '',
+            module: '',
+            search: ''
+        };
+
         // Initialize the dashboard
         document.addEventListener('DOMContentLoaded', function() {
             loadMetrics();
             setupAutoRefresh();
             setupEventListeners();
+            initializeLogs();
         });
 
         function setupEventListeners() {
@@ -693,6 +764,234 @@
             `;
             
             document.querySelector('.container').insertAdjacentHTML('afterbegin', alertHtml);
+        }
+
+        function initializeLogs() {
+            // Setup filter event listeners
+            document.getElementById('logLevelFilter').addEventListener('change', updateLogFilters);
+            document.getElementById('moduleFilter').addEventListener('input', debounce(updateLogFilters, 300));
+            document.getElementById('logSearchFilter').addEventListener('input', debounce(updateLogFilters, 300));
+        }
+
+        function toggleLogs() {
+            if (logWebSocket && logWebSocket.readyState === WebSocket.OPEN) {
+                disconnectLogs();
+            } else {
+                connectLogs();
+            }
+        }
+
+        function connectLogs() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+            
+            logWebSocket = new WebSocket(wsUrl);
+            
+            logWebSocket.onopen = function() {
+                updateLogConnectionStatus('Connected', 'success');
+                updateToggleButton(true);
+            };
+            
+            logWebSocket.onmessage = function(event) {
+                const logEntry = JSON.parse(event.data);
+                addLogEntry(logEntry);
+            };
+            
+            logWebSocket.onclose = function() {
+                updateLogConnectionStatus('Disconnected', 'secondary');
+                updateToggleButton(false);
+            };
+            
+            logWebSocket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateLogConnectionStatus('Error', 'danger');
+                updateToggleButton(false);
+            };
+        }
+
+        function disconnectLogs() {
+            if (logWebSocket) {
+                logWebSocket.close();
+                logWebSocket = null;
+            }
+        }
+
+        function addLogEntry(logEntry) {
+            logBuffer.push(logEntry);
+            logCount++;
+            
+            // Apply filters
+            if (!passesFilters(logEntry)) {
+                updateLogCount();
+                return;
+            }
+            
+            const logContainer = document.getElementById('logContainer');
+            const logElement = createLogElement(logEntry);
+            
+            // Clear initial message if it exists
+            if (logContainer.children.length === 1 && logContainer.children[0].classList.contains('text-muted')) {
+                logContainer.innerHTML = '';
+            }
+            
+            logContainer.appendChild(logElement);
+            
+            // Limit log entries in DOM (keep last 500)
+            if (logContainer.children.length > 500) {
+                logContainer.removeChild(logContainer.firstChild);
+            }
+            
+            // Auto-scroll to bottom
+            if (autoScroll) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+            
+            updateLogCount();
+        }
+
+        function createLogElement(logEntry) {
+            const div = document.createElement('div');
+            div.className = `log-entry log-${logEntry.level.toLowerCase()}`;
+            
+            const timestamp = new Date(logEntry.timestamp_iso);
+            const timeStr = timestamp.toLocaleTimeString();
+            
+            const levelColor = getLevelColor(logEntry.level);
+            const moduleSpan = logEntry.module ? `<span class="text-info">[${logEntry.module}]</span>` : '';
+            const requestId = logEntry.request_id ? `<span class="text-warning">{${logEntry.request_id.slice(0,8)}}</span>` : '';
+            
+            div.innerHTML = `
+                <span class="text-muted">${timeStr}</span>
+                <span class="badge badge-sm" style="background-color: ${levelColor};">${logEntry.level}</span>
+                ${moduleSpan}
+                ${requestId}
+                <span class="log-message">${escapeHtml(logEntry.message)}</span>
+            `;
+            
+            div.style.marginBottom = '2px';
+            div.style.fontSize = '0.8rem';
+            div.style.lineHeight = '1.2';
+            
+            return div;
+        }
+
+        function getLevelColor(level) {
+            switch (level) {
+                case 'DEBUG': return '#6c757d';
+                case 'INFO': return '#17a2b8';
+                case 'WARNING': return '#ffc107';
+                case 'ERROR': return '#dc3545';
+                default: return '#6c757d';
+            }
+        }
+
+        function passesFilters(logEntry) {
+            if (logFilters.level && logEntry.level !== logFilters.level) {
+                return false;
+            }
+            
+            if (logFilters.module && !logEntry.module.toLowerCase().includes(logFilters.module.toLowerCase())) {
+                return false;
+            }
+            
+            if (logFilters.search && !logEntry.message.toLowerCase().includes(logFilters.search.toLowerCase())) {
+                return false;
+            }
+            
+            return true;
+        }
+
+        function updateLogFilters() {
+            logFilters = {
+                level: document.getElementById('logLevelFilter').value,
+                module: document.getElementById('moduleFilter').value,
+                search: document.getElementById('logSearchFilter').value
+            };
+            
+            // Re-render visible logs with new filters
+            rerenderLogs();
+        }
+
+        function rerenderLogs() {
+            const logContainer = document.getElementById('logContainer');
+            logContainer.innerHTML = '';
+            
+            logBuffer.forEach(logEntry => {
+                if (passesFilters(logEntry)) {
+                    logContainer.appendChild(createLogElement(logEntry));
+                }
+            });
+            
+            if (autoScroll) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+        }
+
+        function clearLogs() {
+            logBuffer = [];
+            logCount = 0;
+            document.getElementById('logContainer').innerHTML = 
+                '<div class="text-muted text-center"><i class="fas fa-info-circle me-1"></i>Logs cleared</div>';
+            updateLogCount();
+        }
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            const button = document.querySelector('button[onclick="toggleAutoScroll()"]');
+            const icon = button.querySelector('i');
+            
+            if (autoScroll) {
+                icon.className = 'fas fa-arrows-alt-v me-1';
+                button.title = 'Auto-scroll enabled';
+            } else {
+                icon.className = 'fas fa-pause me-1';
+                button.title = 'Auto-scroll disabled';
+            }
+        }
+
+        function updateLogConnectionStatus(status, type) {
+            const statusEl = document.getElementById('logConnectionStatus');
+            statusEl.textContent = status;
+            statusEl.className = `badge bg-${type}`;
+        }
+
+        function updateToggleButton(connected) {
+            const button = document.getElementById('toggleLogs');
+            const icon = button.querySelector('i');
+            
+            if (connected) {
+                button.textContent = 'Stop';
+                icon.className = 'fas fa-stop me-1';
+                button.className = 'btn btn-outline-danger btn-sm';
+            } else {
+                button.textContent = 'Start';
+                icon.className = 'fas fa-play me-1';
+                button.className = 'btn btn-outline-primary btn-sm';
+            }
+            
+            button.insertBefore(icon, button.firstChild);
+        }
+
+        function updateLogCount() {
+            document.getElementById('logCount').textContent = `${logCount} logs`;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func(...args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
         }
     </script>
 </body>
