@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  webscraper-api:
+    image: webscraper-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # API Configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      
+      # Metrics settings (enabled by default)
+      - METRICS_ENABLED=true
+      - PERSIST_METRICS=true
+      - METRICS_DB_PATH=/app/data/metrics.db
+      - MEMORY_RETENTION_HOURS=24
+      - DB_RETENTION_DAYS=30
+      - MAX_MEMORY_ENTRIES=10000
+      
+      # Proxy pool settings
+      - PROXY_POOL_SIZE=50
+      - MIN_PROXY_POOL_SIZE=10
+      - PROXY_REFRESH_INTERVAL=300
+      - BATCH_UPDATE_INTERVAL=60
+      
+      # Deployment mode
+      - DEPLOYMENT_MODE=standalone
+      - AUTO_DB_SETUP=false
+      
+    volumes:
+      # Persistent volumes for data and config
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  # Local named volumes for easier management
+  data:
+    driver: local
+  config:
+    driver: local
+  logs:
+    driver: local
+
+networks:
+  default:
+    name: webscraper_standalone 
