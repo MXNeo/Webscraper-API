@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webscraper-api
+  labels:
+    app: webscraper-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webscraper-api
+  template:
+    metadata:
+      labels:
+        app: webscraper-api
+    spec:
+      containers:
+      - name: webscraper-api
+        image: webscraper-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: webscraper-secrets
+              key: openai-api-key
+        - name: DB_HOST
+          value: "postgres-service"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "webscraper"
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: webscraper-secrets
+              key: db-user
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: webscraper-secrets
+              key: db-password
+        # Metrics Configuration
+        - name: METRICS_ENABLED
+          value: "true"
+        - name: PERSIST_METRICS
+          value: "true"
+        - name: METRICS_DB_PATH
+          value: "/app/data/metrics.db"
+        - name: MEMORY_RETENTION_HOURS
+          value: "24"
+        - name: DB_RETENTION_DAYS
+          value: "30"
+        - name: MAX_MEMORY_ENTRIES
+          value: "10000"
+        # Proxy Pool Configuration
+        - name: PROXY_POOL_SIZE
+          value: "50"
+        - name: MIN_PROXY_POOL_SIZE
+          value: "10"
+        - name: PROXY_REFRESH_INTERVAL
+          value: "300"
+        - name: BATCH_UPDATE_INTERVAL
+          value: "60"
+        volumeMounts:
+        # Mount persistent data volume
+        - name: data-storage
+          mountPath: /app/data
+        # Mount persistent config volume
+        - name: config-storage
+          mountPath: /app/config
+        # Optional: Mount temporary storage for cache
+        - name: temp-storage
+          mountPath: /tmp
+        resources:
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      # Persistent volume for data (metrics database, etc.)
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: webscraper-data-pvc
+      # Persistent volume for configuration files
+      - name: config-storage
+        persistentVolumeClaim:
+          claimName: webscraper-config-pvc
+      # Temporary storage for cache and temporary files
+      - name: temp-storage
+        emptyDir:
+          sizeLimit: 1Gi
+      restartPolicy: Always 

@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  webscraper-api:
+    image: webscraper-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-your-openai-api-key-here}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=webscraper
+      - DB_USER=postgres
+      - DB_PASSWORD=testpassword123
+      # Metrics settings (enabled by default)
+      - METRICS_ENABLED=true
+      - PERSIST_METRICS=true
+      - METRICS_DB_PATH=/app/data/metrics.db
+      - MEMORY_RETENTION_HOURS=24
+      - DB_RETENTION_DAYS=30
+      - MAX_MEMORY_ENTRIES=10000
+      # Proxy pool settings
+      - PROXY_POOL_SIZE=50
+      - MIN_PROXY_POOL_SIZE=10
+      - PROXY_REFRESH_INTERVAL=300
+      - BATCH_UPDATE_INTERVAL=60
+    volumes:
+      # Persistent volumes for data and config
+      - ./test-data:/app/data
+      - ./test-config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=webscraper
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=testpassword123
+    volumes:
+      # Sample proxy data initialization
+      - ./test-init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d webscraper"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  default:
+    name: webscraper_test_network 
