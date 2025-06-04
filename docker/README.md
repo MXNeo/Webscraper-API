@@ -1,3 +1,147 @@
+# 🐳 Docker Configuration for WebScraper API
+
+This directory contains all Docker-related files for the WebScraper API project.
+
+## 📁 Directory Structure
+
+```
+docker/
+├── Dockerfile                      # Production Dockerfile
+├── docker-compose.yml             # Development with PostgreSQL
+├── docker-compose.full.yml        # Full production setup
+├── docker-compose.standalone.yml  # Standalone mode (no external DB)
+├── docker-compose.test.yml        # Testing setup
+├── build-multiplatform.sh         # Multi-architecture build script
+└── README.md                      # This file
+```
+
+## 🚀 Quick Start
+
+### From the `docker/` directory:
+
+```bash
+# Standalone mode (no external database)
+docker-compose -f docker-compose.standalone.yml up --build
+
+# Development mode (with PostgreSQL)
+docker-compose -f docker-compose.yml up --build
+
+# Full production setup
+docker-compose -f docker-compose.full.yml up
+
+# Testing mode
+docker-compose -f docker-compose.test.yml up --build
+```
+
+### From the **root directory**:
+
+```bash
+# Using the docker-compose files from root
+docker-compose -f docker/docker-compose.standalone.yml up --build
+```
+
+## 🔧 Build Context
+
+All docker-compose files use the correct build context:
+- **Context**: `..` (parent directory)
+- **Dockerfile**: `docker/Dockerfile`
+
+This ensures the Dockerfile can access all application files while keeping Docker configs organized.
+
+## 📋 Available Compose Files
+
+### 1. `docker-compose.standalone.yml`
+- **Use case**: Local development, testing
+- **Database**: Uses SQLite (metrics only)
+- **Features**: Metrics enabled, no proxy database
+
+### 2. `docker-compose.yml`
+- **Use case**: Development with full database
+- **Database**: PostgreSQL with proxy management
+- **Features**: Full feature set with persistence
+
+### 3. `docker-compose.full.yml`
+- **Use case**: Production deployment
+- **Database**: PostgreSQL + pgAdmin
+- **Features**: Complete production setup with monitoring
+
+### 4. `docker-compose.test.yml`
+- **Use case**: CI/CD, testing
+- **Database**: PostgreSQL with test data
+- **Features**: Pre-loaded test proxies and configuration
+
+## 🏗️ Building Images
+
+### Local Build
+```bash
+# From docker directory
+docker build -f Dockerfile -t webscraper-api:local ..
+```
+
+### Multi-platform Build
+```bash
+# From docker directory
+./build-multiplatform.sh
+```
+
+## 📂 Volume Mounts
+
+All compose files correctly mount volumes from the parent directory:
+- `../data` → `/app/data` (metrics, databases)
+- `../config` → `/app/config` (configurations)
+- `../logs` → `/app/logs` (application logs)
+
+## 🔒 Environment Variables
+
+Create a `.env` file in the **root directory** (not in docker/) with:
+
+```bash
+# Required
+OPENAI_API_KEY=sk-your-api-key-here
+
+# Database (for full setup)
+DB_USER=your_db_user
+DB_PASSWORD=your_secure_password
+DB_NAME=webscraper
+
+# Metrics (optional)
+METRICS_ENABLED=true
+PERSIST_METRICS=true
+```
+
+## 🧪 Testing the Configuration
+
+```bash
+# Validate docker-compose files
+docker-compose -f docker-compose.standalone.yml config
+docker-compose -f docker-compose.yml config
+docker-compose -f docker-compose.full.yml config
+```
+
+## 🐛 Troubleshooting
+
+### Build Context Issues
+If you see "file not found" errors:
+- Make sure you're using the correct build context (`..`)
+- Verify the Dockerfile path (`docker/Dockerfile`)
+- Run from the `docker/` directory
+
+### Volume Mount Issues
+- Ensure directories exist in parent directory
+- Check volume paths use `../` prefix
+- Verify permissions on mounted directories
+
+### Network Issues
+- Each compose file uses its own network
+- Use service names for inter-container communication
+- Check port conflicts if running multiple setups
+
+## 📚 Additional Documentation
+
+- [Development Setup](../docs/DEVELOPMENT_TRACKING.md)
+- [Deployment Guide](../docs/DEPLOYMENT.md)
+- [Testing Guide](../docs/TESTING.md)
+
 # Docker Deployment
 
 This directory contains Docker deployment files for the WebScraper API with **full cross-platform compatibility** for Windows, macOS (Intel & Apple Silicon), and Linux systems.
