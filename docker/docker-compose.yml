@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   webscraper-api:
-    build: .
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -40,7 +42,7 @@ services:
       # Persistent volume for PostgreSQL data
       - postgres_data:/var/lib/postgresql/data
       # Optional: Initialize with proxy schema
-      - ./migrations:/docker-entrypoint-initdb.d
+      - ../migrations:/docker-entrypoint-initdb.d
     ports:
       - "${DB_PORT:-5432}:5432"
     restart: unless-stopped
@@ -57,14 +59,14 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: ./data
+      device: ../data
   
   webscraper_config:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ./config
+      device: ../config
   
   postgres_data:
     driver: local

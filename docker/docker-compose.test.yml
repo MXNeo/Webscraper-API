@@ -26,8 +26,8 @@ services:
       - BATCH_UPDATE_INTERVAL=60
     volumes:
       # Persistent volumes for data and config
-      - ./test-data:/app/data
-      - ./test-config:/app/config
+      - ../test:/app/data
+      - ../config:/app/config
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,7 +41,7 @@ services:
       - POSTGRES_PASSWORD=testpassword123
     volumes:
       # Sample proxy data initialization
-      - ./test-init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ../test/test-init.sql:/docker-entrypoint-initdb.d/01-init.sql
     ports:
       - "5432:5432"
     restart: unless-stopped

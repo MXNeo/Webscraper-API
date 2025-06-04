@@ -28,7 +28,7 @@ services:
       # API Key (can be overridden in .env file)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     networks:
       - webscraper_full
     depends_on:
@@ -51,7 +51,7 @@ services:
       POSTGRES_PASSWORD: secure_postgres_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts:/docker-entrypoint-initdb.d/
+      - ../scripts:/docker-entrypoint-initdb.d/
     networks:
       - webscraper_full
     healthcheck:

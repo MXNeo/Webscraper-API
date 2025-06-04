@@ -4,8 +4,8 @@ services:
   webscraper-api:
     image: webscraper-api:latest
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     ports:
       - "8000:8000"
     environment:
@@ -32,9 +32,9 @@ services:
       
     volumes:
       # Persistent volumes for data and config
-      - ./data:/app/data
-      - ./config:/app/config
-      - ./logs:/app/logs
+      - ../data:/app/data
+      - ../config:/app/config
+      - ../logs:/app/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
