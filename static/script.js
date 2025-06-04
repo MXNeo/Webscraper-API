@@ -1,163 +1,480 @@
 // Load configuration status on page load
 document.addEventListener('DOMContentLoaded', function() {
-    loadConfigStatus();
+    loadSystemStatus();
+    setupFormHandlers();
+});
+
+// Setup form event handlers
+function setupFormHandlers() {
+    // ScrapeGraph AI config form
+    const scrapegraphForm = document.getElementById('scrapegraph-config-form');
+    if (scrapegraphForm) {
+        scrapegraphForm.addEventListener('submit', saveScrapeGraphConfig);
+    }
     
-    // Add proxy toggle event listener
+    // Database config form
+    const databaseForm = document.getElementById('database-config-form');
+    if (databaseForm) {
+        databaseForm.addEventListener('submit', saveDatabaseConfig);
+    }
+    
+    // Initialize DB button
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    if (initializeBtn) {
+        initializeBtn.addEventListener('click', initializeDatabase);
+    }
+    
+    // Test connection button
+    const testBtn = document.getElementById('test-connection-btn');
+    if (testBtn) {
+        testBtn.addEventListener('click', testDatabaseConnection);
+    }
+    
+    // Proxy toggle
     const proxyToggle = document.getElementById('proxy-toggle');
     if (proxyToggle) {
         proxyToggle.addEventListener('change', toggleProxyUsage);
     }
-});
-
-// Provider field toggle function
-function toggleProviderFields() {
-    const provider = document.getElementById('provider').value;
-    const apiKeyField = document.getElementById('api-key-field');
-    const baseUrlField = document.getElementById('base-url-field');
-    const azureFields = document.getElementById('azure-fields');
-    const modelSuggestions = document.getElementById('model-suggestions');
-    const suggestionList = document.getElementById('suggestion-list');
-    const modelHelp = document.getElementById('model-help');
-    const apiKeyInput = document.getElementById('api-key');
-    
-    // Reset visibility
-    azureFields.style.display = 'none';
-    modelSuggestions.style.display = 'none';
-    
-    // Configure fields based on provider
-    switch(provider) {
-        case 'openai':
-            apiKeyField.style.display = 'block';
-            baseUrlField.style.display = 'block';
-            apiKeyInput.required = true;
-            modelHelp.textContent = 'Enter OpenAI model name (e.g., gpt-4o, gpt-3.5-turbo, gpt-4-turbo)';
-            suggestionList.innerHTML = `
-                <span class="badge bg-secondary me-1" onclick="setModel('gpt-4o')">gpt-4o</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('gpt-4-turbo')">gpt-4-turbo</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('gpt-3.5-turbo')">gpt-3.5-turbo</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('gpt-4o-mini')">gpt-4o-mini</span>
-            `;
-            modelSuggestions.style.display = 'block';
-            break;
-            
-        case 'anthropic':
-            apiKeyField.style.display = 'block';
-            baseUrlField.style.display = 'block';
-            apiKeyInput.required = true;
-            modelHelp.textContent = 'Enter Anthropic model name (e.g., claude-3-opus-20240229, claude-3-sonnet-20240229)';
-            suggestionList.innerHTML = `
-                <span class="badge bg-secondary me-1" onclick="setModel('claude-3-opus-20240229')">claude-3-opus-20240229</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('claude-3-sonnet-20240229')">claude-3-sonnet-20240229</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('claude-3-haiku-20240307')">claude-3-haiku-20240307</span>
-            `;
-            modelSuggestions.style.display = 'block';
-            break;
-            
-        case 'ollama':
-            apiKeyField.style.display = 'none';
-            baseUrlField.style.display = 'block';
-            apiKeyInput.required = false;
-            document.getElementById('base-url').value = 'http://localhost:11434';
-            modelHelp.textContent = 'Enter Ollama model name (e.g., llama3, mistral, codellama)';
-            suggestionList.innerHTML = `
-                <span class="badge bg-secondary me-1" onclick="setModel('ollama/llama3')">ollama/llama3</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('ollama/mistral')">ollama/mistral</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('ollama/codellama')">ollama/codellama</span>
-                <span class="badge bg-secondary me-1" onclick="setModel('ollama/phi3')">ollama/phi3</span>
-            `;
-            modelSuggestions.style.display = 'block';
-            break;
-            
-        case 'azure':
-            apiKeyField.style.display = 'block';
-            baseUrlField.style.display = 'block';
-            azureFields.style.display = 'block';
-            apiKeyInput.required = true;
-            modelHelp.textContent = 'Enter Azure deployment model name';
-            break;
-            
-        case 'custom':
-            apiKeyField.style.display = 'block';
-            baseUrlField.style.display = 'block';
-            apiKeyInput.required = false;
-            modelHelp.textContent = 'Enter custom model name or identifier';
-            break;
-            
-        default:
-            apiKeyField.style.display = 'block';
-            baseUrlField.style.display = 'block';
-            apiKeyInput.required = true;
-            modelHelp.textContent = 'Enter the exact model name';
-    }
 }
 
-// Set model name from suggestion
-function setModel(modelName) {
-    document.getElementById('model').value = modelName;
-}
-
-// Load configuration status
-async function loadConfigStatus() {
+// Load system status and auto-detect configuration
+async function loadSystemStatus() {
     try {
-        const response = await fetch('/api/config/status');
-        const data = await response.json();
+        // First check for auto-detection
+        const autoDetectResponse = await fetch('/api/config/auto-detect');
+        const autoDetectData = await autoDetectResponse.json();
         
-        console.log('Configuration status:', data);
+        console.log('Auto-detection result:', autoDetectData);
         
-        // Update ScrapeGraph AI status
-        updateStatusIndicator('scrapegraph-status', data.scrapegraph.status === 'configured', data.scrapegraph.status);
+        // Auto-fill database fields if in full compose mode
+        if (autoDetectData.database_auto_configured) {
+            fillDatabaseFields(autoDetectData);
+            showDeploymentInfo(autoDetectData.deployment_mode);
+        }
         
-        // Update Database status
-        updateStatusIndicator('database-status', data.database.status === 'connected', data.database.status);
-        updateDatabaseDetails(data.database);
+        // Load regular config status
+        const statusResponse = await fetch('/api/config/status');
+        const statusData = await statusResponse.json();
         
-        // Update Proxy status
-        updateProxyStatus(data.proxy);
+        console.log('Configuration status:', statusData);
+        
+        // Update all status indicators - use auto-detect data for database status
+        updateApiStatus(statusData.scrapegraph);
+        updateDatabaseStatus(autoDetectData);
+        updateProxyStatus(statusData.proxy);
         
     } catch (error) {
-        console.error('Error loading config status:', error);
-        showAlert('Error loading configuration status: ' + error.message, 'danger');
+        console.error('Error loading system status:', error);
+        showAlert('Error loading system status: ' + error.message, 'danger');
     }
 }
 
-// Update status indicator with more detailed status
-function updateStatusIndicator(elementId, isConfigured, status) {
-    const element = document.getElementById(elementId);
-    if (element) {
+// Fill database fields with auto-detected values
+function fillDatabaseFields(config) {
+    console.log('Filling database fields with config:', config);
+    
+    // Only fill if elements exist
+    const hostField = document.getElementById('db-host');
+    const portField = document.getElementById('db-port');
+    const nameField = document.getElementById('db-name');
+    const userField = document.getElementById('db-user');
+    const passwordField = document.getElementById('db-password');
+    const tableField = document.getElementById('db-table');
+    
+    if (hostField) hostField.value = config.db_host || '';
+    if (portField) portField.value = config.db_port || 5432;
+    if (nameField) nameField.value = config.db_name || '';
+    if (userField) userField.value = config.db_user || '';
+    if (tableField) tableField.value = 'proxies';
+    
+    // For full compose mode, indicate password is auto-configured
+    if (config.deployment_mode === 'full' && passwordField) {
+        passwordField.placeholder = 'Auto-configured from environment';
+        passwordField.value = 'auto_configured_placeholder'; // Hidden placeholder value
+        passwordField.disabled = false; // Keep it editable
+    }
+}
+
+// Show deployment mode information
+function showDeploymentInfo(deploymentMode) {
+    const infoDiv = document.getElementById('deployment-info');
+    const messageSpan = document.getElementById('deployment-message');
+    
+    if (infoDiv && messageSpan) {
+        if (deploymentMode === 'full') {
+            messageSpan.textContent = 'Full compose mode detected - database connection pre-configured but editable';
+            infoDiv.style.display = 'block';
+            infoDiv.className = 'alert alert-success';
+        } else {
+            messageSpan.textContent = 'Standalone mode - please configure database connection manually';
+            infoDiv.style.display = 'block';
+            infoDiv.className = 'alert alert-info';
+        }
+    }
+}
+
+// Update system status display
+function updateSystemStatus(config) {
+    const statusBadge = document.getElementById('db-connection-status');
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    const statusDetails = document.getElementById('db-status-details');
+    const statusJson = document.getElementById('db-status-json');
+    
+    if (config.database_connected) {
+        statusBadge.textContent = 'Connected';
+        statusBadge.className = 'badge bg-success ms-2';
+        
+        if (config.table_exists) {
+            initializeBtn.textContent = 'Reinitialize Database';
+            initializeBtn.className = 'btn btn-warning';
+            initializeBtn.disabled = false;
+        } else {
+            initializeBtn.textContent = 'Initialize Database';
+            initializeBtn.className = 'btn btn-success';
+            initializeBtn.disabled = false;
+        }
+    } else {
+        statusBadge.textContent = config.connection_message || 'Not Connected';
+        statusBadge.className = 'badge bg-danger ms-2';
+        initializeBtn.disabled = true;
+    }
+    
+    // Show detailed status
+    statusDetails.style.display = 'block';
+    statusJson.textContent = JSON.stringify(config, null, 2);
+}
+
+// Update the database configuration section status
+function updateDatabaseConfigSection(config) {
+    const statusBadge = document.getElementById('db-connection-status');
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    const statusDetails = document.getElementById('db-status-details');
+    const statusJson = document.getElementById('db-status-json');
+    
+    if (config.database_connected) {
+        statusBadge.textContent = 'Connected (Auto-configured)';
+        statusBadge.className = 'badge bg-success ms-2';
+        
+        // Enable the initialize button for auto-configured setups
+        initializeBtn.disabled = false;
+        
+        if (config.table_exists) {
+            initializeBtn.textContent = 'Reinitialize Database';
+            initializeBtn.className = 'btn btn-warning';
+            initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
+        } else {
+            initializeBtn.textContent = 'Initialize Database';
+            initializeBtn.className = 'btn btn-success';
+            initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Initialize Database';
+        }
+    } else {
+        statusBadge.textContent = config.connection_message || 'Not Connected';
+        statusBadge.className = 'badge bg-danger ms-2';
+        initializeBtn.disabled = true;
+    }
+    
+    // Show detailed status
+    if (statusDetails && statusJson) {
+        statusDetails.style.display = 'block';
+        statusJson.textContent = JSON.stringify(config, null, 2);
+    }
+}
+
+// Save database configuration
+async function saveDatabaseConfig(event) {
+    event.preventDefault();
+    
+    const config = {
+        host: document.getElementById('db-host').value,
+        port: parseInt(document.getElementById('db-port').value),
+        database: document.getElementById('db-name').value,
+        username: document.getElementById('db-user').value,
+        password: document.getElementById('db-password').value,
+        table: document.getElementById('db-table').value
+    };
+    
+    // Handle auto-configured password
+    if (config.password === 'auto_configured_placeholder') {
+        // For auto-configured setups, get the password from environment
+        // The backend will handle this
+        config.password = ''; // Let backend use environment variable
+    }
+    
+    try {
+        const response = await fetch('/api/database/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            showAlert('Database configuration saved successfully!', 'success');
+            loadSystemStatus(); // Refresh status
+        } else {
+            showAlert(`Database configuration failed: ${result.error}`, 'danger');
+        }
+    } catch (error) {
+        showAlert(`Error saving database configuration: ${error.message}`, 'danger');
+    }
+}
+
+// Test database connection
+async function testDatabaseConnection() {
+    const config = {
+        host: document.getElementById('db-host').value,
+        port: parseInt(document.getElementById('db-port').value),
+        database: document.getElementById('db-name').value,
+        username: document.getElementById('db-user').value,
+        password: document.getElementById('db-password').value,
+        table: document.getElementById('db-table').value
+    };
+    
+    // Handle auto-configured password - use a special indicator
+    if (config.password === 'auto_configured_placeholder') {
+        // For testing, we'll use the environment values
+        showAlert('Using auto-configured database connection for test...', 'info');
+        
+        // Test with auto-detect endpoint instead
+        try {
+            const response = await fetch('/api/config/auto-detect');
+            const result = await response.json();
+            
+            if (result.database_connected) {
+                showAlert('Database connection successful (auto-configured)!', 'success');
+                loadSystemStatus(); // Refresh status
+            } else {
+                showAlert(`Database connection failed: ${result.connection_message}`, 'danger');
+            }
+        } catch (error) {
+            showAlert(`Error testing auto-configured connection: ${error.message}`, 'danger');
+        }
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/database/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            showAlert('Database connection successful!', 'success');
+            
+            // Enable initialize button for successful manual connections
+            const initializeBtn = document.getElementById('initialize-db-btn');
+            initializeBtn.disabled = false;
+            
+            loadSystemStatus(); // Refresh status
+        } else {
+            showAlert(`Database connection failed: ${result.error}`, 'danger');
+        }
+    } catch (error) {
+        showAlert(`Error testing database connection: ${error.message}`, 'danger');
+    }
+}
+
+// Initialize database (create tables)
+async function initializeDatabase() {
+    if (!confirm('This will create/recreate the proxies table. Continue?')) {
+        return;
+    }
+    
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    const originalText = initializeBtn.textContent;
+    initializeBtn.disabled = true;
+    initializeBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Initializing...';
+    
+    try {
+        const response = await fetch('/api/database/initialize', {
+            method: 'POST'
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            showAlert('Database initialized successfully!', 'success');
+            loadSystemStatus(); // Refresh status
+        } else {
+            showAlert(`Database initialization failed: ${result.error}`, 'danger');
+        }
+    } catch (error) {
+        showAlert(`Error initializing database: ${error.message}`, 'danger');
+    } finally {
+        initializeBtn.disabled = false;
+        initializeBtn.textContent = originalText;
+    }
+}
+
+// Refresh system status
+async function refreshSystemStatus() {
+    const refreshBtn = document.querySelector('button[onclick="refreshSystemStatus()"]');
+    if (refreshBtn) {
+        const originalHtml = refreshBtn.innerHTML;
+        
+        // Show loading state
+        refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Refreshing...';
+        refreshBtn.disabled = true;
+        
+        try {
+            await loadSystemStatus();
+            showAlert('System status refreshed successfully', 'success');
+        } catch (error) {
+            showAlert('Error refreshing system status: ' + error.message, 'danger');
+        } finally {
+            // Restore button
+            setTimeout(() => {
+                refreshBtn.innerHTML = originalHtml;
+                refreshBtn.disabled = false;
+            }, 1000);
+        }
+    } else {
+        await loadSystemStatus();
+    }
+}
+
+// Update deployment info
+function updateDeploymentInfo(autoDetectData) {
+    const deploymentInfo = document.getElementById('deployment-info');
+    const deploymentMode = document.getElementById('deployment-mode');
+    
+    if (deploymentInfo && deploymentMode) {
+        deploymentMode.textContent = autoDetectData.deployment_mode || 'Unknown';
+        deploymentInfo.style.display = 'block';
+        
+        // Add additional info based on deployment mode
+        if (autoDetectData.deployment_mode === 'full') {
+            deploymentInfo.className = 'alert alert-success';
+            deploymentMode.textContent += ' (with PostgreSQL database)';
+        } else {
+            deploymentInfo.className = 'alert alert-info';
+            deploymentMode.textContent += ' (manual configuration required)';
+        }
+    }
+}
+
+// Update API status
+function updateApiStatus(apiConfig) {
+    const statusElement = document.getElementById('api-status');
+    const detailsElement = document.getElementById('api-details');
+    
+    if (statusElement) {
         let badgeClass = 'badge bg-warning';
         let text = 'Not Configured';
         
-        switch(status) {
+        switch(apiConfig.status) {
             case 'configured':
-            case 'connected':
                 badgeClass = 'badge bg-success';
-                text = status === 'configured' ? 'Configured' : 'Connected';
+                text = 'Configured';
                 break;
             case 'error':
                 badgeClass = 'badge bg-danger';
                 text = 'Error';
                 break;
-            case 'not_configured':
-            default:
-                badgeClass = 'badge bg-warning';
-                text = 'Not Configured';
         }
         
-        element.className = badgeClass;
-        element.textContent = text;
+        statusElement.className = badgeClass;
+        statusElement.textContent = text;
+    }
+    
+    if (detailsElement) {
+        if (apiConfig.message) {
+            detailsElement.textContent = apiConfig.message;
+            detailsElement.style.display = 'block';
+        } else {
+            detailsElement.style.display = 'none';
+        }
     }
 }
 
-// Update database details
-function updateDatabaseDetails(databaseConfig) {
-    const detailsElement = document.getElementById('database-details');
-    if (detailsElement && databaseConfig.message) {
-        detailsElement.textContent = databaseConfig.message;
-        detailsElement.style.display = 'block';
+// Update database status with auto-detection support
+function updateDatabaseStatus(autoDetectData) {
+    const statusElement = document.getElementById('database-status');
+    const statusBadge = document.getElementById('db-connection-status');
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    const statusDetails = document.getElementById('db-status-details');
+    const statusJson = document.getElementById('db-status-json');
+    
+    let badgeClass = 'badge bg-warning';
+    let text = 'Not Connected';
+    let details = '';
+    
+    if (autoDetectData.database_auto_configured) {
+        if (autoDetectData.database_connected) {
+            if (autoDetectData.table_exists) {
+                badgeClass = 'badge bg-success';
+                text = 'Ready (Auto-configured)';
+                details = `Connected to ${autoDetectData.db_host}:${autoDetectData.db_port}/${autoDetectData.db_name} - Table exists with complete schema`;
+                
+                // Enable reinitialize button
+                if (initializeBtn) {
+                    initializeBtn.disabled = false;
+                    initializeBtn.textContent = 'Reinitialize Database';
+                    initializeBtn.className = 'btn btn-warning';
+                    initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
+                }
+            } else {
+                badgeClass = 'badge bg-warning';
+                text = 'Connected (Auto-configured)';
+                details = `Connected to ${autoDetectData.db_host}:${autoDetectData.db_port}/${autoDetectData.db_name} - Table missing`;
+                
+                // Enable initialize button
+                if (initializeBtn) {
+                    initializeBtn.disabled = false;
+                    initializeBtn.textContent = 'Initialize Database';
+                    initializeBtn.className = 'btn btn-success';
+                    initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Initialize Database';
+                }
+            }
+        } else {
+            badgeClass = 'badge bg-danger';
+            text = 'Connection Failed';
+            details = autoDetectData.connection_message || 'Database connection failed';
+            
+            if (initializeBtn) {
+                initializeBtn.disabled = true;
+            }
+        }
+    } else {
+        // Manual configuration needed
+        badgeClass = 'badge bg-warning';
+        text = 'Not Configured';
+        details = 'Manual database configuration required';
+        
+        if (initializeBtn) {
+            initializeBtn.disabled = true;
+        }
+    }
+    
+    // Update status elements
+    if (statusElement) {
+        statusElement.className = badgeClass;
+        statusElement.textContent = text;
+    }
+    
+    if (statusBadge) {
+        statusBadge.className = badgeClass;
+        statusBadge.textContent = text;
+    }
+    
+    if (statusDetails) {
+        statusDetails.textContent = details;
+        statusDetails.style.display = details ? 'block' : 'none';
+    }
+    
+    if (statusJson) {
+        statusJson.textContent = JSON.stringify(autoDetectData, null, 2);
+        if (statusJson.parentElement) {
+            statusJson.parentElement.style.display = 'block';
+        }
     }
 }
 
-// Update proxy status and controls
+// Update proxy status
 function updateProxyStatus(proxyConfig) {
     const statusElement = document.getElementById('proxy-status');
     const detailsElement = document.getElementById('proxy-details');
@@ -183,9 +500,10 @@ function updateProxyStatus(proxyConfig) {
     if (detailsElement) {
         if (proxyConfig.available_proxies > 0) {
             detailsElement.textContent = `${proxyConfig.available_proxies} proxies available`;
-            detailsElement.style.display = 'block';
+        } else if (proxyConfig.enabled) {
+            detailsElement.textContent = 'No proxies available in database';
         } else {
-            detailsElement.style.display = 'none';
+            detailsElement.textContent = 'Disabled - requires database configuration';
         }
     }
     
@@ -200,67 +518,97 @@ function updateProxyStatus(proxyConfig) {
     }
 }
 
-// Toggle proxy usage
-async function toggleProxyUsage() {
-    const enabled = document.getElementById('proxy-toggle').checked;
+// Initialize full setup (for compose deployments)
+async function initializeFullSetup() {
+    const button = document.querySelector('button[onclick="initializeFullSetup()"]');
+    const originalHtml = button.innerHTML;
+    
+    // Show loading state
+    button.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Initializing...';
+    button.disabled = true;
     
     try {
-        const formData = new FormData();
-        formData.append('enabled', enabled);
-        
-        const response = await fetch('/api/config/proxy/toggle', {
-            method: 'POST',
-            body: formData
+        const response = await fetch('/api/config/initialize-setup', {
+            method: 'GET'
         });
         
-        const result = await response.json();
+        const data = await response.json();
         
-        if (response.ok) {
-            showAlert(result.message, 'success');
-            loadConfigStatus(); // Reload status
+        if (response.ok && data.success) {
+            showAlert('Full setup initialized successfully! Database connected and proxies table created.', 'success');
+            
+            // Hide the initialize button
+            const autoSetupElement = document.getElementById('database-auto-setup');
+            if (autoSetupElement) {
+                autoSetupElement.style.display = 'none';
+            }
+            
+            // Refresh status
+            await loadSystemStatus();
+            
         } else {
-            showAlert('Error: ' + result.detail, 'danger');
-            // Revert toggle state
-            document.getElementById('proxy-toggle').checked = !enabled;
+            throw new Error(data.message || 'Failed to initialize setup');
         }
+        
     } catch (error) {
-        showAlert('Error toggling proxy usage: ' + error.message, 'danger');
-        // Revert toggle state
-        document.getElementById('proxy-toggle').checked = !enabled;
+        console.error('Error initializing setup:', error);
+        showAlert('Error initializing setup: ' + error.message, 'danger');
+    } finally {
+        // Restore button
+        button.innerHTML = originalHtml;
+        button.disabled = false;
     }
 }
 
-// Handle ScrapeGraph AI configuration form submission
-document.getElementById('scrapegraph-config-form').addEventListener('submit', async function(e) {
-    e.preventDefault();
+// Provider field toggle function
+function toggleProviderFields() {
+    const provider = document.getElementById('provider').value;
+    const apiKeyField = document.getElementById('api-key-field');
+    const apiKeyInput = document.getElementById('api-key');
+    
+    // Configure fields based on provider
+    switch(provider) {
+        case 'openai':
+            apiKeyField.style.display = 'block';
+            apiKeyInput.required = true;
+            break;
+            
+        case 'anthropic':
+            apiKeyField.style.display = 'block';
+            apiKeyInput.required = true;
+            break;
+            
+        case 'ollama':
+            apiKeyField.style.display = 'none';
+            apiKeyInput.required = false;
+            break;
+            
+        case 'azure':
+            apiKeyField.style.display = 'block';
+            apiKeyInput.required = true;
+            break;
+            
+        case 'custom':
+            apiKeyField.style.display = 'block';
+            apiKeyInput.required = false;
+            break;
+            
+        default:
+            apiKeyField.style.display = 'block';
+            apiKeyInput.required = true;
+    }
+}
+
+// Save ScrapeGraph AI configuration
+async function saveScrapeGraphConfig(event) {
+    event.preventDefault();
     
     const formData = new FormData();
     formData.append('provider', document.getElementById('provider').value);
     formData.append('model', document.getElementById('model').value);
-    
-    const apiKey = document.getElementById('api-key').value;
-    if (apiKey) formData.append('api_key', apiKey);
-    
-    const baseUrl = document.getElementById('base-url').value;
-    if (baseUrl) formData.append('base_url', baseUrl);
-    
+    formData.append('api_key', document.getElementById('api-key').value);
     formData.append('temperature', document.getElementById('temperature').value);
-    
-    const maxTokens = document.getElementById('max-tokens').value;
-    if (maxTokens) formData.append('max_tokens', maxTokens);
-    
-    // Add Azure-specific parameters if provider is Azure
-    const provider = document.getElementById('provider').value;
-    if (provider === 'azure') {
-        const apiVersion = document.getElementById('api-version').value;
-        if (apiVersion) formData.append('api_version', apiVersion);
-        
-        const deploymentName = document.getElementById('deployment-name').value;
-        if (deploymentName) formData.append('deployment_name', deploymentName);
-        
-        const embeddingsDeployment = document.getElementById('embeddings-deployment').value;
-        if (embeddingsDeployment) formData.append('embeddings_deployment', embeddingsDeployment);
-    }
+    formData.append('max_tokens', document.getElementById('max-tokens').value);
     
     try {
         const response = await fetch('/api/config/scrapegraph', {
@@ -268,380 +616,18 @@ document.getElementById('scrapegraph-config-form').addEventListener('submit', as
             body: formData
         });
         
-        const result = await response.json();
+        const data = await response.json();
         
         if (response.ok) {
-            showAlert('Configuration saved successfully!', 'success');
-            loadConfigStatus(); // Reload status
+            showAlert('ScrapeGraph AI configuration saved successfully!', 'success');
+            await loadSystemStatus();
         } else {
-            showAlert('Error: ' + result.detail, 'danger');
+            throw new Error(data.detail || 'Failed to save configuration');
         }
+        
     } catch (error) {
+        console.error('Error saving ScrapeGraph AI config:', error);
         showAlert('Error saving configuration: ' + error.message, 'danger');
-    }
-});
-
-// Handle database configuration form submission
-document.getElementById('database-config-form').addEventListener('submit', async function(e) {
-    e.preventDefault();
-    
-    const formData = new FormData();
-    formData.append('host', document.getElementById('db-host').value);
-    formData.append('port', document.getElementById('db-port').value);
-    formData.append('database', document.getElementById('db-name').value);
-    formData.append('username', document.getElementById('db-username').value);
-    formData.append('password', document.getElementById('db-password').value);
-    
-    try {
-        const response = await fetch('/api/config/database', {
-            method: 'POST',
-            body: formData
-        });
-        
-        const result = await response.json();
-        
-        if (response.ok) {
-            showAlert(`Database configuration saved! ${result.proxy_table_status}`, 'success');
-            loadConfigStatus(); // Reload status
-        } else {
-            showAlert('Error: ' + result.detail, 'danger');
-        }
-    } catch (error) {
-        showAlert('Error saving database configuration: ' + error.message, 'danger');
-    }
-});
-
-// Test database connection
-async function testDatabaseConnection() {
-    try {
-        // Get form data
-        const form = document.getElementById('database-config-form');
-        const formData = new FormData(form);
-        
-        // Validate required fields - using correct field names from HTML
-        const host = document.getElementById('db-host').value;
-        const database = document.getElementById('db-name').value;
-        const username = document.getElementById('db-username').value;
-        const password = document.getElementById('db-password').value;
-        const port = document.getElementById('db-port').value;
-        
-        if (!host || !database || !username || !password) {
-            showAlert('Please fill in all required database fields before testing', 'warning');
-            return;
-        }
-        
-        // Create FormData with correct field names for the API
-        const testFormData = new FormData();
-        testFormData.append('host', host);
-        testFormData.append('port', port || 5432);
-        testFormData.append('database', database);
-        testFormData.append('username', username);
-        testFormData.append('password', password);
-        
-        // Show loading state
-        const testButton = document.querySelector('button[onclick="testDatabaseConnection()"]');
-        const originalText = testButton.textContent;
-        testButton.disabled = true;
-        testButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Testing...';
-        
-        const response = await fetch('/api/config/database/test', {
-            method: 'POST',
-            body: testFormData
-        });
-        
-        const result = await response.json();
-        
-        if (response.ok && result.success) {
-            let message = `✅ ${result.message}`;
-            if (result.proxy_table_ok) {
-                message += `\n📊 ${result.proxy_table_status}`;
-                if (result.available_proxies > 0) {
-                    message += `\n🔗 ${result.available_proxies} proxies available for use`;
-                }
-            } else {
-                message += `\n⚠️ ${result.proxy_table_status}`;
-            }
-            showAlert(message, 'success');
-        } else {
-            const errorMessage = result.detail || result.message || 'Unknown error occurred';
-            showAlert(`❌ Database test failed: ${errorMessage}`, 'danger');
-        }
-        
-        // Restore button state
-        testButton.disabled = false;
-        testButton.textContent = originalText;
-        
-    } catch (error) {
-        console.error('Database test error:', error);
-        showAlert('❌ Error testing database: ' + error.message, 'danger');
-        
-        // Restore button state
-        const testButton = document.querySelector('button[onclick="testDatabaseConnection()"]');
-        testButton.disabled = false;
-        testButton.textContent = 'Test Connection';
-    }
-}
-
-// Delete database configuration
-async function deleteDatabaseConfig() {
-    if (!confirm('Are you sure you want to delete the database configuration? This will also disable proxy usage.')) {
-        return;
-    }
-    
-    try {
-        const response = await fetch('/api/config/database', {
-            method: 'DELETE'
-        });
-        
-        const result = await response.json();
-        
-        if (response.ok) {
-            showAlert('Database configuration deleted successfully!', 'success');
-            loadConfigStatus(); // Reload status
-            // Clear form
-            document.getElementById('database-config-form').reset();
-        } else {
-            showAlert('Error: ' + result.detail, 'danger');
-        }
-    } catch (error) {
-        showAlert('Error deleting database configuration: ' + error.message, 'danger');
-    }
-}
-
-// Test proxy connection
-async function testProxyConnection() {
-    const testResults = document.getElementById('proxy-test-results');
-    const testContent = document.getElementById('proxy-test-content');
-    
-    testContent.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Testing...</div>';
-    testResults.style.display = 'block';
-    
-    try {
-        const response = await fetch('/api/proxy/test');
-        const result = await response.json();
-        
-        if (result.success) {
-            let proxyList = '';
-            if (result.sample_proxies && result.sample_proxies.length > 0) {
-                proxyList = '<h6>Sample Proxies:</h6><ul>';
-                result.sample_proxies.forEach(proxy => {
-                    proxyList += `<li>${proxy.address}:${proxy.port} (${proxy.type}) - Errors: ${proxy.error_count} ${proxy.has_auth ? '🔐' : ''}</li>`;
-                });
-                proxyList += '</ul>';
-            }
-            
-            testContent.innerHTML = `
-                <div class="alert alert-success">
-                    <strong>Success!</strong> ${result.message}
-                </div>
-                ${proxyList}
-            `;
-        } else {
-            testContent.innerHTML = `
-                <div class="alert alert-danger">
-                    <strong>Failed!</strong> ${result.message}
-                </div>
-            `;
-        }
-    } catch (error) {
-        testContent.innerHTML = `
-            <div class="alert alert-danger">
-                <strong>Error!</strong> ${error.message}
-            </div>
-        `;
-    }
-}
-
-// Get proxy statistics
-async function getProxyStats() {
-    const statsResults = document.getElementById('proxy-stats-results');
-    const statsContent = document.getElementById('proxy-stats-content');
-    
-    statsContent.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Loading...</div>';
-    statsResults.style.display = 'block';
-    
-    try {
-        const response = await fetch('/api/proxy/stats');
-        const result = await response.json();
-        
-        if (result.error) {
-            statsContent.innerHTML = `
-                <div class="alert alert-danger">
-                    <strong>Error!</strong> ${result.error}
-                </div>
-            `;
-        } else {
-            statsContent.innerHTML = `
-                <div class="row">
-                    <div class="col-md-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h5 class="card-title">${result.total_proxies || 0}</h5>
-                                <p class="card-text">Total Proxies</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h5 class="card-title">${result.active_proxies || 0}</h5>
-                                <p class="card-text">Active Proxies</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h5 class="card-title">${result.usable_proxies || 0}</h5>
-                                <p class="card-text">Usable Proxies<br><small>(error_count < 5)</small></p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h5 class="card-title">${result.high_error_proxies || 0}</h5>
-                                <p class="card-text">High Error Proxies<br><small>(error_count ≥ 5)</small></p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="mt-3">
-                    <p><strong>Average Error Count:</strong> ${result.avg_error_count ? parseFloat(result.avg_error_count).toFixed(2) : 'N/A'}</p>
-                </div>
-            `;
-        }
-    } catch (error) {
-        statsContent.innerHTML = `
-            <div class="alert alert-danger">
-                <strong>Error!</strong> ${error.message}
-            </div>
-        `;
-    }
-}
-
-// Scrape with selected method
-async function scrapeWithMethod(method) {
-    const url = document.getElementById('url').value;
-    if (!url) {
-        showAlert('Please enter a URL to scrape', 'warning');
-        return;
-    }
-    
-    const useProxy = document.getElementById('use-proxy-test').checked;
-    const resultsDiv = document.getElementById('scrape-results');
-    const resultsContent = document.getElementById('results-content');
-    
-    // Show loading
-    resultsContent.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"></div><p>Scraping...</p></div>';
-    resultsDiv.style.display = 'block';
-    
-    try {
-        const requestBody = { url: url };
-        if (useProxy) {
-            requestBody.use_proxy = true;
-        }
-        
-        const response = await fetch(`/api/scrape/${method}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody)
-        });
-        
-        const result = await response.json();
-        
-        if (result.status === 'success') {
-            let contentDisplay = '';
-            let imageDisplay = '';
-            let proxyInfo = '';
-            
-            // Show proxy usage info
-            if (result.proxy_used) {
-                proxyInfo = `<div class="alert alert-info"><small>🌐 Used proxy: ${result.proxy_used}</small></div>`;
-            } else if (useProxy) {
-                proxyInfo = `<div class="alert alert-warning"><small>⚠️ Proxy requested but not used (no proxies available)</small></div>`;
-            }
-            
-            // Debug: Log the actual response structure
-            console.log('API Response:', result);
-            
-            // Both methods now return the same standardized format: content, top_image, published
-            const content = result.content;
-            
-            if (content && typeof content === 'object' && content.content !== undefined) {
-                // Standardized response format for both methods
-                const actualContent = typeof content.content === 'string' ? content.content : 
-                                    (typeof content.content === 'object' ? JSON.stringify(content.content, null, 2) : 
-                                     String(content.content));
-                
-                contentDisplay = `
-                    ${content.published ? `<h6>Published:</h6><p>${content.published}</p>` : ''}
-                    <h6>Content:</h6>
-                    <div class="border p-3" style="max-height: 400px; overflow-y: auto; white-space: pre-wrap;">
-                        ${actualContent || 'No content found'}
-                    </div>
-                `;
-                imageDisplay = content.top_image ? `<img src="${content.top_image}" class="img-fluid" alt="Article image">` : '<p class="text-muted">No image found</p>';
-            } else if (typeof content === 'string') {
-                // String response (fallback)
-                contentDisplay = `
-                    <h6>Extracted Content:</h6>
-                    <div class="border p-3" style="max-height: 400px; overflow-y: auto; white-space: pre-wrap;">
-                        ${content}
-                    </div>
-                `;
-                imageDisplay = '<p class="text-muted">Content extraction</p>';
-            } else {
-                // JSON object response (fallback) - better handling
-                console.warn('Unexpected content structure:', content);
-                contentDisplay = `
-                    <h6>Debug - Raw Response:</h6>
-                    <div class="border p-3" style="max-height: 400px; overflow-y: auto;">
-                        <pre>${JSON.stringify(content, null, 2)}</pre>
-                    </div>
-                    <div class="alert alert-warning mt-2">
-                        <small>Unexpected response format. Please check the console for details.</small>
-                    </div>
-                `;
-                imageDisplay = '<p class="text-muted">Content extraction</p>';
-            }
-            
-            resultsContent.innerHTML = `
-                <div class="alert alert-success">
-                    <strong>Success!</strong> Scraped using ${method === 'newspaper' ? 'Newspaper4k' : 'ScrapGraph AI'}
-                </div>
-                ${proxyInfo}
-                <div class="row">
-                    <div class="col-md-8">
-                        ${contentDisplay}
-                    </div>
-                    <div class="col-md-4">
-                        <h6>Image:</h6>
-                        ${imageDisplay}
-                    </div>
-                </div>
-            `;
-        } else {
-            let proxyInfo = '';
-            if (result.proxy_used) {
-                proxyInfo = `<div class="alert alert-warning"><small>🌐 Failed with proxy: ${result.proxy_used}</small></div>`;
-            }
-            
-            resultsContent.innerHTML = `
-                <div class="alert alert-danger">
-                    <strong>Error!</strong> ${result.error || 'Unknown error occurred'}
-                </div>
-                ${proxyInfo}
-            `;
-        }
-    } catch (error) {
-        resultsContent.innerHTML = `
-            <div class="alert alert-danger">
-                <strong>Error!</strong> ${error.message}
-            </div>
-        `;
     }
 }
 
@@ -656,19 +642,332 @@ async function deleteScrapegraphConfig() {
             method: 'DELETE'
         });
         
-        const result = await response.json();
-        
         if (response.ok) {
-            showAlert('Configuration deleted successfully!', 'success');
-            loadConfigStatus(); // Reload status
-            // Clear form
+            showAlert('ScrapeGraph AI configuration deleted successfully!', 'success');
+            
+            // Reset form
             document.getElementById('scrapegraph-config-form').reset();
+            
+            await loadSystemStatus();
         } else {
-            showAlert('Error: ' + result.detail, 'danger');
+            throw new Error('Failed to delete configuration');
         }
+        
     } catch (error) {
+        console.error('Error deleting ScrapeGraph AI config:', error);
         showAlert('Error deleting configuration: ' + error.message, 'danger');
     }
+}
+
+// Delete database configuration
+async function deleteDatabaseConfig() {
+    if (!confirm('Are you sure you want to delete the database configuration?')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/config/database', {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            showAlert('Database configuration deleted successfully!', 'success');
+            
+            // Reset form
+            document.getElementById('database-config-form').reset();
+            
+            // Hide create table button
+            const createTableBtn = document.getElementById('create-table-btn');
+            if (createTableBtn) {
+                createTableBtn.style.display = 'none';
+            }
+            
+            await loadSystemStatus();
+        } else {
+            throw new Error('Failed to delete database configuration');
+        }
+        
+    } catch (error) {
+        console.error('Error deleting database config:', error);
+        showAlert('Error deleting database configuration: ' + error.message, 'danger');
+    }
+}
+
+// Toggle proxy usage
+async function toggleProxyUsage() {
+    const toggle = document.getElementById('proxy-toggle');
+    
+    try {
+        const formData = new FormData();
+        formData.append('enabled', toggle.checked);
+        
+        const response = await fetch('/api/config/proxy/toggle', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showAlert(`Proxy usage ${toggle.checked ? 'enabled' : 'disabled'} successfully!`, 'success');
+            await loadSystemStatus();
+        } else {
+            // Revert toggle on error
+            toggle.checked = !toggle.checked;
+            throw new Error(data.detail || 'Failed to toggle proxy usage');
+        }
+        
+    } catch (error) {
+        console.error('Error toggling proxy usage:', error);
+        showAlert('Error toggling proxy usage: ' + error.message, 'danger');
+        // Revert toggle on error
+        toggle.checked = !toggle.checked;
+    }
+}
+
+// Scrape with specific method
+async function scrapeWithMethod(method) {
+    const url = document.getElementById('url').value;
+    const useProxy = document.getElementById('use-proxy-test').checked;
+    
+    if (!url) {
+        showAlert('Please enter a URL to scrape', 'warning');
+        return;
+    }
+    
+    const resultsDiv = document.getElementById('scrape-results');
+    const resultsContent = document.getElementById('results-content');
+    
+    // Show loading state
+    resultsContent.innerHTML = '<div class="text-center"><i class="fas fa-spinner fa-spin me-2"></i>Scraping content...</div>';
+    resultsDiv.style.display = 'block';
+    
+    try {
+        const endpoint = method === 'scrapegraph' ? '/api/scrape/scrapegraph' : '/api/scrape/newspaper';
+        
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                url: url,
+                use_proxy: useProxy
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            // Display enhanced results with proper parsing
+            resultsContent.innerHTML = formatScrapingResults(data, method);
+        } else {
+            throw new Error(data.detail || data.error || 'Scraping failed');
+        }
+        
+    } catch (error) {
+        console.error('Error scraping:', error);
+        resultsContent.innerHTML = `
+            <div class="alert alert-danger">
+                <strong>Error:</strong> ${error.message}
+            </div>
+        `;
+    }
+}
+
+// Format scraping results with enhanced display and metrics
+function formatScrapingResults(data, method) {
+    const content = data.content || {};
+    
+    // Calculate metrics
+    const contentText = content.content || '';
+    const characterCount = contentText.length;
+    const wordCount = contentText.trim() ? contentText.trim().split(/\s+/).length : 0;
+    
+    // Build the enhanced result HTML
+    let resultHtml = `
+        <div class="alert alert-success mb-3">
+            <strong>Success!</strong> Content scraped using ${method}
+        </div>
+        
+        <!-- Request Info -->
+        <div class="card mb-3">
+            <div class="card-header bg-light">
+                <h6 class="mb-0"><i class="fas fa-info-circle me-2"></i>Request Information</h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <strong>URL:</strong> <small class="text-muted">${data.url}</small><br>
+                        <strong>Method:</strong> ${method}<br>
+                        <strong>Proxy Used:</strong> ${data.proxy_used || 'None'}
+                    </div>
+                    <div class="col-md-6">
+                        <strong>Content Metrics:</strong><br>
+                        <span class="badge bg-primary me-2">${characterCount.toLocaleString()} characters</span>
+                        <span class="badge bg-info">${wordCount.toLocaleString()} words</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Main content and metadata layout
+    resultHtml += `<div class="row">`;
+    
+    // Left column - Content
+    resultHtml += `
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header bg-light">
+                    <h6 class="mb-0"><i class="fas fa-file-alt me-2"></i>Extracted Content</h6>
+                </div>
+                <div class="card-body">
+    `;
+    
+    if (contentText) {
+        resultHtml += `
+            <div class="content-display" style="max-height: 500px; overflow-y: auto; line-height: 1.6;">
+                ${contentText.replace(/\n/g, '<br>').replace(/\t/g, '&nbsp;&nbsp;&nbsp;&nbsp;')}
+            </div>
+        `;
+    } else {
+        resultHtml += `
+            <div class="text-muted text-center py-4">
+                <i class="fas fa-exclamation-triangle"></i> No content extracted
+            </div>
+        `;
+    }
+    
+    resultHtml += `
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Right column - Metadata and Image
+    resultHtml += `
+        <div class="col-md-4">
+    `;
+    
+    // Display image if available
+    if (content.top_image) {
+        resultHtml += `
+            <div class="card mb-3">
+                <div class="card-header bg-light">
+                    <h6 class="mb-0"><i class="fas fa-image me-2"></i>Featured Image</h6>
+                </div>
+                <div class="card-body p-2">
+                    <img src="${content.top_image}" 
+                         class="img-fluid rounded" 
+                         style="width: 100%; max-height: 200px; object-fit: cover;"
+                         alt="Article image"
+                         onerror="this.parentElement.innerHTML='<div class=\\"text-muted text-center py-3\\"><i class=\\"fas fa-image-slash\\"></i><br>Image failed to load</div>'">
+                </div>
+            </div>
+        `;
+    }
+    
+    // Display metadata
+    resultHtml += `
+        <div class="card">
+            <div class="card-header bg-light">
+                <h6 class="mb-0"><i class="fas fa-tags me-2"></i>Article Metadata</h6>
+            </div>
+            <div class="card-body">
+    `;
+    
+    // Title
+    if (content.title) {
+        resultHtml += `
+            <div class="mb-3">
+                <strong>Title:</strong><br>
+                <span class="text-primary">${content.title}</span>
+            </div>
+        `;
+    }
+    
+    // Authors
+    if (content.authors && content.authors.length > 0) {
+        const authorsList = Array.isArray(content.authors) 
+            ? content.authors.join(', ') 
+            : content.authors;
+        resultHtml += `
+            <div class="mb-3">
+                <strong>Authors:</strong><br>
+                <span class="text-secondary">${authorsList}</span>
+            </div>
+        `;
+    }
+    
+    // Publication date
+    if (content.published) {
+        const publishedDate = new Date(content.published);
+        const formattedDate = publishedDate.toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+        resultHtml += `
+            <div class="mb-3">
+                <strong>Published:</strong><br>
+                <span class="text-success">${formattedDate}</span>
+            </div>
+        `;
+    }
+    
+    // Summary if available
+    if (content.summary && content.summary.trim()) {
+        resultHtml += `
+            <div class="mb-3">
+                <strong>Summary:</strong><br>
+                <div class="text-muted small" style="line-height: 1.4;">
+                    ${content.summary.substring(0, 200)}${content.summary.length > 200 ? '...' : ''}
+                </div>
+            </div>
+        `;
+    }
+    
+    // Performance metrics
+    resultHtml += `
+        <div class="border-top pt-3 mt-3">
+            <strong>Performance:</strong><br>
+            <small class="text-muted">
+                <div><i class="fas fa-chart-bar me-1"></i> ${characterCount.toLocaleString()} chars</div>
+                <div><i class="fas fa-word-spacing me-1"></i> ${wordCount.toLocaleString()} words</div>
+                <div><i class="fas fa-clock me-1"></i> ${method.charAt(0).toUpperCase() + method.slice(1)}</div>
+            </small>
+        </div>
+    `;
+    
+    resultHtml += `
+            </div>
+        </div>
+    </div>
+    `;
+    
+    // Close the row
+    resultHtml += `</div>`;
+    
+    // Raw JSON toggle (collapsed by default)
+    resultHtml += `
+        <div class="mt-3">
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#rawJson" aria-expanded="false">
+                <i class="fas fa-code me-1"></i> View Raw JSON
+            </button>
+            <div class="collapse mt-2" id="rawJson">
+                <div class="card">
+                    <div class="card-body">
+                        <pre class="small text-muted mb-0" style="max-height: 300px; overflow-y: auto;">${JSON.stringify(data.content, null, 2)}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    return resultHtml;
 }
 
 // Show alert message
@@ -684,10 +983,12 @@ function showAlert(message, type) {
     const container = document.querySelector('.container');
     container.insertBefore(alertDiv, container.firstChild);
     
-    // Auto-dismiss after 5 seconds
-    setTimeout(() => {
-        if (alertDiv.parentNode) {
-            alertDiv.remove();
-        }
-    }, 5000);
+    // Auto-remove after 5 seconds for success/info messages
+    if (type === 'success' || type === 'info') {
+        setTimeout(() => {
+            if (alertDiv && alertDiv.parentNode) {
+                alertDiv.remove();
+            }
+        }, 5000);
+    }
 } 
