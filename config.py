@@ -299,10 +299,11 @@ class Config:
         self.config["scrapegraph"] = {}
         self._save_config()
     
-    def update_database_config(self, host: str, database: str, table: str, username: str, password: str):
+    def update_database_config(self, host: str, database: str, table: str, username: str, password: str, port: int = 5432):
         """Update database configuration"""
         self.config["database"] = {
             "host": host,
+            "port": port,
             "database": database,
             "table": table,
             "username": username,

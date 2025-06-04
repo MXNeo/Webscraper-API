@@ -139,6 +139,17 @@ class ScrapeResponse(BaseModel):
     error: Optional[str] = None
     proxy_used: Optional[str] = None
 
+class ScrapeGraphConfigRequest(BaseModel):
+    api_key: str
+
+class DatabaseConfigRequest(BaseModel):
+    host: str
+    port: int = 5432
+    database: str
+    username: str
+    password: str
+    table: str = "proxies"
+
 # Default LLM configuration
 def get_llm_config(api_key: str = None):
     return {
@@ -173,7 +184,7 @@ async def proxy_management_page(request: Request):
         "request": request
     })
 
-@app.post("/web/scrape", response_class=HTMLResponse)
+@app.post("/api/scrape", response_class=HTMLResponse)
 async def web_scrape(
     request: Request,
     url: str = Form(...),
@@ -538,87 +549,30 @@ async def test_database_config(
         logger.error(f"Unexpected error testing database configuration: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.post("/api/config/database")
-async def save_database_config(
-    host: str = Form(...),
-    port: int = Form(5432),
-    database: str = Form(...),
-    username: str = Form(...),
-    password: str = Form(...)
-):
-    """Save database configuration and test connection"""
+@app.post("/api/database/config")
+async def save_database_config(request: DatabaseConfigRequest):
+    """Save database configuration"""
     try:
-        logger.info(f"Received database configuration request:")
-        logger.info(f"  Host: {host}")
-        logger.info(f"  Port: {port}")
-        logger.info(f"  Database: {database}")
-        logger.info(f"  Username: {username}")
-        logger.info(f"  Password: {'*' * len(password) if password else 'None'}")
+        # Handle auto-configured password (when empty, use environment if available)
+        password = request.password
+        if not password and os.getenv("DB_PASSWORD"):
+            password = os.getenv("DB_PASSWORD")
+            logger.info("Using auto-configured database password from environment")
         
-        # Validate input parameters
-        if not host or not host.strip():
-            logger.error("Database host is empty or invalid")
-            raise HTTPException(status_code=400, detail="Database host is required and cannot be empty")
+        config_instance.update_database_config(
+            host=request.host,
+            database=request.database,
+            table=request.table,
+            username=request.username,
+            password=password,
+            port=request.port
+        )
         
-        if not database or not database.strip():
-            logger.error("Database name is empty or invalid")
-            raise HTTPException(status_code=400, detail="Database name is required and cannot be empty")
+        return {"success": True, "message": "Database configuration saved successfully"}
         
-        if not username or not username.strip():
-            logger.error("Database username is empty or invalid")
-            raise HTTPException(status_code=400, detail="Database username is required and cannot be empty")
-        
-        if not password or not password.strip():
-            logger.error("Database password is empty or invalid")
-            raise HTTPException(status_code=400, detail="Database password is required and cannot be empty")
-        
-        if not isinstance(port, int) or port <= 0 or port > 65535:
-            logger.error(f"Invalid port number: {port}")
-            raise HTTPException(status_code=400, detail="Port must be a valid number between 1 and 65535")
-        
-        config = {
-            "host": host.strip(),
-            "port": port,
-            "database": database.strip(),
-            "username": username.strip(),
-            "password": password.strip(),
-            "configured_at": time.time()
-        }
-        
-        logger.info("Database configuration validated, testing connection...")
-        
-        # Test the connection before saving
-        config_store["database"] = config
-        logger.info("Testing database connection...")
-        db_test_result, db_test_message = db_manager.test_connection()
-        
-        if not db_test_result:
-            # Remove the config if test failed
-            config_store["database"] = None
-            logger.error(f"Database connection test failed: {db_test_message}")
-            raise HTTPException(status_code=400, detail=f"Database connection test failed: {db_test_message}")
-        
-        logger.info("Database connection successful, testing proxy table...")
-        
-        # Test proxy table
-        proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
-        
-        logger.info(f"Database configuration saved and tested: {host}:{port}/{database}")
-        logger.info(f"Proxy table test: {proxy_test_message}")
-        
-        return {
-            "message": "Database configuration saved and tested successfully",
-            "status": "connected",
-            "proxy_table_status": proxy_test_message,
-            "available_proxies": proxy_count
-        }
-        
-    except HTTPException:
-        raise
     except Exception as e:
-        config_store["database"] = None
-        logger.error(f"Unexpected error saving database configuration: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"Failed to save database config: {str(e)}")
+        return {"error": f"Failed to save database configuration: {str(e)}"}
 
 @app.delete("/api/config/database")
 async def delete_database_config():
@@ -1784,6 +1738,282 @@ async def get_deployment_info():
         "container_id": os.getenv("HOSTNAME", "unknown"),
         "version": "1.0.0"
     }
+
+@app.get("/api/config/auto-detect")
+async def auto_detect_configuration():
+    """Auto-detect configuration for compose setup"""
+    try:
+        config = {
+            "database_auto_configured": False,
+            "table_exists": False,
+            "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standalone"),
+            "auto_db_setup": os.getenv("AUTO_DB_SETUP", "false").lower() == "true"
+        }
+        
+        # Check if database is auto-configured from environment
+        if all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
+            config["database_auto_configured"] = True
+            config["db_host"] = os.getenv("DB_HOST")
+            config["db_name"] = os.getenv("DB_NAME")
+            config["db_user"] = os.getenv("DB_USER")
+            config["db_port"] = int(os.getenv("DB_PORT", "5432"))
+            
+            # Test connection and check table existence
+            try:
+                # Temporarily configure database for testing
+                config_instance.update_database_config(
+                    host=os.getenv("DB_HOST"),
+                    database=os.getenv("DB_NAME"),
+                    table=os.getenv("DB_TABLE", "proxies"),
+                    username=os.getenv("DB_USER"),
+                    password=os.getenv("DB_PASSWORD"),
+                    port=int(os.getenv("DB_PORT", "5432"))
+                )
+                
+                # Test connection
+                db_test_result, db_test_message = db_manager.test_connection()
+                if db_test_result:
+                    config["database_connected"] = True
+                    config["connection_message"] = db_test_message
+                    
+                    # Check if proxies table exists
+                    table_status = await get_table_status()
+                    config["table_exists"] = table_status.get("table_exists", False)
+                    config["table_status"] = table_status
+                else:
+                    config["database_connected"] = False
+                    config["connection_message"] = db_test_message
+                    
+            except Exception as e:
+                config["database_connected"] = False
+                config["connection_message"] = f"Connection test failed: {str(e)}"
+        
+        return config
+        
+    except Exception as e:
+        logger.error(f"Auto-detect configuration failed: {str(e)}")
+        return {
+            "database_auto_configured": False,
+            "table_exists": False,
+            "deployment_mode": "standalone",
+            "error": str(e)
+        }
+
+@app.get("/api/config/initialize-setup")
+async def initialize_full_setup():
+    """Initialize the full setup with database and proxy table"""
+    try:
+        if not all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
+            raise HTTPException(status_code=400, detail="Database environment variables not configured")
+        
+        # Configure database
+        config_instance.update_database_config(
+            host=os.getenv("DB_HOST"),
+            database=os.getenv("DB_NAME"),
+            table=os.getenv("DB_TABLE", "proxies"),
+            username=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            port=int(os.getenv("DB_PORT", "5432"))
+        )
+        
+        # Test connection
+        db_test_result, db_test_message = db_manager.test_connection()
+        if not db_test_result:
+            raise HTTPException(status_code=500, detail=f"Database connection failed: {db_test_message}")
+        
+        # Create proxies table if it doesn't exist
+        table_result = await create_proxies_table()
+        
+        # Enable proxy usage if table was created successfully
+        if table_result.get("success"):
+            config_store["proxy_enabled"] = True
+        
+        return {
+            "success": True,
+            "message": "Full setup initialized successfully",
+            "database_configured": True,
+            "table_status": table_result,
+            "proxy_enabled": config_store["proxy_enabled"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Initialize full setup failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/database/initialize")
+async def initialize_database():
+    """Initialize database table with complete structure"""
+    try:
+        # Check if we have database configuration
+        db_config = config_instance.get_database_config()
+        
+        # For auto-configured setups, use environment variables
+        if not db_config and os.getenv("DB_HOST"):
+            logger.info("Using environment variables for database initialization")
+            config_instance.update_database_config(
+                host=os.getenv("DB_HOST"),
+                database=os.getenv("DB_NAME"),
+                table=os.getenv("DB_TABLE", "proxies"),
+                username=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASSWORD"),
+                port=int(os.getenv("DB_PORT", "5432"))
+            )
+            db_config = config_instance.get_database_config()
+        
+        if not db_config:
+            return {"error": "Database not configured. Please configure database connection first."}
+        
+        # Test connection first
+        db_test_result, db_test_message = db_manager.test_connection()
+        if not db_test_result:
+            return {"error": f"Database connection failed: {db_test_message}"}
+        
+        # Use the existing database manager to create the table
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Create the complete table structure with all columns
+            create_table_sql = """
+            CREATE TABLE IF NOT EXISTS proxies (
+                id SERIAL PRIMARY KEY,
+                
+                -- Basic proxy information
+                address VARCHAR(255) NOT NULL,
+                port INTEGER NOT NULL CHECK (port > 0 AND port <= 65535),
+                type VARCHAR(10) DEFAULT 'http' CHECK (type IN ('http', 'https', 'socks4', 'socks5')),
+                
+                -- Authentication
+                username VARCHAR(255),
+                password VARCHAR(255),
+                
+                -- Status and performance tracking
+                status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'testing', 'failed')),
+                error_count INTEGER DEFAULT 0 CHECK (error_count >= 0),
+                success_count INTEGER DEFAULT 0 CHECK (success_count >= 0),
+                
+                -- Usage tracking
+                last_used TIMESTAMP DEFAULT NULL,
+                last_tested TIMESTAMP DEFAULT NULL,
+                response_time_ms INTEGER DEFAULT NULL,
+                
+                -- Geographic and provider information
+                country VARCHAR(2),  -- ISO country code
+                region VARCHAR(100),
+                provider VARCHAR(100),
+                
+                -- Metadata
+                notes TEXT,
+                tags VARCHAR(500),  -- JSON array as string
+                
+                -- Timestamps
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                -- Ensure uniqueness
+                UNIQUE(address, port, username)
+            )
+            """
+            
+            # Execute table creation
+            cursor.execute(create_table_sql)
+            
+            # Add missing columns to existing table if needed
+            alter_statements = [
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS success_count INTEGER DEFAULT 0",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS last_used TIMESTAMP DEFAULT NULL",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS last_tested TIMESTAMP DEFAULT NULL", 
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS response_time_ms INTEGER DEFAULT NULL",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS country VARCHAR(2)",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS region VARCHAR(100)",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS provider VARCHAR(100)",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS notes TEXT",
+                "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS tags VARCHAR(500)"
+            ]
+            
+            for statement in alter_statements:
+                try:
+                    cursor.execute(statement)
+                except Exception as e:
+                    # Column might already exist, that's okay
+                    logger.debug(f"Alter statement skipped (column might exist): {statement} - {str(e)}")
+            
+            # Create indexes for better performance
+            index_statements = [
+                "CREATE INDEX IF NOT EXISTS idx_proxies_status_errors ON proxies(status, error_count)",
+                "CREATE INDEX IF NOT EXISTS idx_proxies_last_used ON proxies(last_used)",
+                "CREATE INDEX IF NOT EXISTS idx_proxies_last_tested ON proxies(last_tested)",
+                "CREATE INDEX IF NOT EXISTS idx_proxies_type ON proxies(type)",
+                "CREATE INDEX IF NOT EXISTS idx_proxies_country ON proxies(country)",
+                "CREATE INDEX IF NOT EXISTS idx_proxies_provider ON proxies(provider)",
+                "CREATE INDEX IF NOT EXISTS idx_proxies_response_time ON proxies(response_time_ms)"
+            ]
+            
+            for statement in index_statements:
+                try:
+                    cursor.execute(statement)
+                except Exception as e:
+                    logger.debug(f"Index creation skipped: {statement} - {str(e)}")
+            
+            conn.commit()
+            
+            # Get updated table info
+            cursor.execute("""
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns 
+                WHERE table_name = 'proxies' 
+                ORDER BY ordinal_position;
+            """)
+            columns = cursor.fetchall()
+            
+            # Get row count
+            cursor.execute("SELECT COUNT(*) as count FROM proxies;")
+            row_count = cursor.fetchone()['count']
+            
+            cursor.close()
+            
+        return {
+            "success": True,
+            "message": f"Database initialized successfully! Table created/updated with {len(columns)} columns and {row_count} rows.",
+            "table_info": {
+                "columns": [dict(col) for col in columns],
+                "row_count": row_count
+            }
+        }
+            
+    except Exception as e:
+        logger.error(f"Database initialization failed: {str(e)}", exc_info=True)
+        return {"error": f"Database initialization failed: {str(e)}"}
+
+@app.post("/api/database/test")
+async def test_database_connection(request: DatabaseConfigRequest):
+    """Test database connection"""
+    try:
+        import psycopg2
+        
+        # Test connection
+        conn = psycopg2.connect(
+            host=request.host,
+            port=request.port,
+            database=request.database,
+            user=request.username,
+            password=request.password
+        )
+        
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1;")
+                    
+            return {"success": True, "message": "Database connection successful"}
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Database connection test failed: {str(e)}")
+        return {"error": f"Database connection failed: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
