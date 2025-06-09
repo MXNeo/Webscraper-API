@@ -74,6 +74,7 @@ class Config:
             with open(self.config_file, 'r') as f:
                 self.config = json.load(f)
         else:
+            # Start with completely empty config - no defaults
             self.config = {
                 "scrapegraph": {},
                 "database": {}

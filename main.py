@@ -273,7 +273,6 @@ async def health_check():
         "platform": platform.system(),
         "python_version": platform.python_version(),
         "timestamp": int(time.time()),
-        "circuit_breaker_state": db_manager.circuit_breaker.state,
         "proxy_pool_size": proxy_pool.available_proxies.qsize()
     }
 
@@ -560,15 +559,48 @@ async def test_database_config(
         logger.error(f"Unexpected error testing database configuration: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@app.get("/api/config/database")
+async def get_database_config():
+    """Get current database configuration"""
+    try:
+        db_config = config_instance.get_database_config()
+        if not db_config:
+            return {"configured": False, "message": "Database not configured"}
+        
+        # Return config without sensitive password
+        safe_config = {
+            "configured": True,
+            "host": db_config.get("host"),
+            "port": db_config.get("port", 5432),
+            "database": db_config.get("database"),
+            "username": db_config.get("username"),
+            "table": db_config.get("table", "proxies")
+        }
+        return safe_config
+        
+    except Exception as e:
+        logger.error(f"Failed to get database config: {str(e)}")
+        return {"configured": False, "error": str(e)}
+
 @app.post("/api/database/config")
 async def save_database_config(request: DatabaseConfigRequest):
     """Save database configuration"""
     try:
-        # Handle auto-configured password (when empty, use environment if available)
+        # Handle password field - if empty, check for existing or environment
         password = request.password
-        if not password and os.getenv("DB_PASSWORD"):
-            password = os.getenv("DB_PASSWORD")
-            logger.info("Using auto-configured database password from environment")
+        if not password:
+            # First try environment variable (for auto-configured setups)
+            if os.getenv("DB_PASSWORD"):
+                password = os.getenv("DB_PASSWORD")
+                logger.info("Using auto-configured database password from environment")
+            else:
+                # Try to keep existing password if form submitted with empty password field
+                existing_config = config_instance.get_database_config()
+                if existing_config and existing_config.get("password"):
+                    password = existing_config["password"]
+                    logger.info("Keeping existing database password")
+                else:
+                    return {"success": False, "error": "Password is required for new database configuration"}
         
         config_instance.update_database_config(
             host=request.host,
@@ -596,7 +628,10 @@ async def save_database_config(request: DatabaseConfigRequest):
         # Reset database manager connection pool to use new config
         db_manager.disconnect()
         
-        logger.info(f"Database configuration saved and config store updated: {request.host}:{request.port}")
+        # Force reload the configuration from the saved file
+        config_instance._load_config()
+        
+        logger.info(f"Database configuration saved successfully: {request.host}:{request.port}/{request.database} (user: {request.username})")
         
         return {"success": True, "message": "Database configuration saved successfully"}
         
@@ -1006,7 +1041,7 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                         'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate',  # Let requests handle decompression
+                        'Accept-Encoding': 'gzip, deflate, br',
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1',
                         'Sec-Fetch-Dest': 'document',
@@ -1594,18 +1629,10 @@ async def get_service_stats():
         # Get proxy pool stats
         pool_stats = proxy_pool.get_pool_stats()
         
-        # Get circuit breaker status
-        circuit_breaker_status = {
-            "state": db_manager.circuit_breaker.state,
-            "failure_count": db_manager.circuit_breaker.failure_count,
-            "last_failure_time": db_manager.circuit_breaker.last_failure_time
-        }
-        
         return {
             "timestamp": int(time.time()),
             "proxy_stats": proxy_stats,
             "proxy_pool_stats": pool_stats,
-            "circuit_breaker": circuit_breaker_status,
             "config": {
                 "proxy_enabled": config_store.get("proxy_enabled", False),
                 "proxy_retry_count": config_store.get("proxy_retry_count", 3),
@@ -2080,7 +2107,7 @@ class WebSocketLogHandler(logging.Handler):
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     # If we're in an async context, schedule the task
-            asyncio.create_task(self.log_manager.broadcast_log(log_entry))
+                    asyncio.create_task(self.log_manager.broadcast_log(log_entry))
                 else:
                     # If not in async context, run it directly
                     loop.run_until_complete(self.log_manager.broadcast_log(log_entry))

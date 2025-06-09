@@ -10,45 +10,10 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-class CircuitBreaker:
-    """Simple circuit breaker to prevent cascading failures"""
-    def __init__(self, failure_threshold=5, recovery_timeout=60):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.failure_count = 0
-        self.last_failure_time = None
-        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
-        self._lock = threading.Lock()
-    
-    def call(self, func, *args, **kwargs):
-        with self._lock:
-            if self.state == 'OPEN':
-                if time.time() - self.last_failure_time > self.recovery_timeout:
-                    self.state = 'HALF_OPEN'
-                else:
-                    raise Exception("Circuit breaker is OPEN - database operations temporarily disabled")
-            
-            try:
-                result = func(*args, **kwargs)
-                if self.state == 'HALF_OPEN':
-                    self.state = 'CLOSED'
-                    self.failure_count = 0
-                return result
-            except Exception as e:
-                self.failure_count += 1
-                self.last_failure_time = time.time()
-                
-                if self.failure_count >= self.failure_threshold:
-                    self.state = 'OPEN'
-                    logger.error(f"Circuit breaker opened after {self.failure_count} failures")
-                
-                raise e
-
 class DatabaseManager:
     def __init__(self, config_store=None):
         self.config_store = config_store
         self.connection_pool = None
-        self.circuit_breaker = CircuitBreaker()
         self._lock = threading.Lock()
         self._schema_checked = False
         self._has_last_used_column = False
@@ -76,7 +41,7 @@ class DatabaseManager:
                 user=db_config["username"],
                 password=db_config["password"],
                 cursor_factory=RealDictCursor,
-                connect_timeout=5  # Reduced timeout
+                connect_timeout=5
             )
             
             logger.info(f"Successfully created connection pool for: {db_config['host']}:{db_config.get('port', 5432)}")
@@ -163,7 +128,7 @@ class DatabaseManager:
     
     def test_connection(self) -> Tuple[bool, str]:
         """Test database connection and return status with message"""
-        def _test():
+        try:
             logger.info("Starting database connection test...")
             
             db_config = self.get_database_config()
@@ -188,8 +153,6 @@ class DatabaseManager:
                     logger.error("Database test query returned no results")
                     return False, "Database query returned no results"
         
-        try:
-            return self.circuit_breaker.call(_test)
         except psycopg2.OperationalError as e:
             db_config = self.get_database_config()
             error_msg = f"Database connection failed: {str(e)}"
@@ -213,7 +176,7 @@ class DatabaseManager:
     
     def test_proxy_table(self) -> Tuple[bool, str, int]:
         """Test proxy table access and return status with proxy count"""
-        def _test():
+        try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -251,9 +214,6 @@ class DatabaseManager:
                 message = f"Proxy table OK: {active_count}/{total_count} active proxies (error_count < 5)"
                 logger.info(message)
                 return True, message, active_count
-        
-        try:
-            return self.circuit_breaker.call(_test)
         except Exception as e:
             error_msg = f"Proxy table test failed: {str(e)}"
             logger.error(error_msg)
@@ -263,7 +223,7 @@ class DatabaseManager:
         """
         Get working proxies from database with retry logic
         """
-        def _get_proxies():
+        try:
             self._check_schema()
             
             with self.get_connection() as conn:
@@ -298,9 +258,6 @@ class DatabaseManager:
                 
                 logger.info(f"Retrieved {len(proxy_list)} active proxies from database")
                 return proxy_list[:count]  # Return only requested count
-        
-        try:
-            return self.circuit_breaker.call(_get_proxies)
         except Exception as e:
             logger.error(f"Failed to retrieve proxies: {str(e)}")
             return []
@@ -309,7 +266,7 @@ class DatabaseManager:
         """
         Increment error count for a failed proxy with exponential backoff
         """
-        def _increment():
+        try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -335,9 +292,6 @@ class DatabaseManager:
                 else:
                     logger.error(f"Proxy {proxy_id} not found for error increment")
                     return False
-        
-        try:
-            return self.circuit_breaker.call(_increment)
         except Exception as e:
             logger.error(f"Failed to increment proxy error count: {str(e)}")
             return False
@@ -346,7 +300,7 @@ class DatabaseManager:
         """
         Update last used timestamp for a proxy (only if column exists)
         """
-        def _update():
+        try:
             self._check_schema()
             
             if not self._has_last_used_column:
@@ -368,16 +322,13 @@ class DatabaseManager:
                 
                 logger.debug(f"Updated last_used timestamp for proxy {proxy_id}")
                 return True
-        
-        try:
-            return self.circuit_breaker.call(_update)
         except Exception as e:
             logger.error(f"Failed to update proxy last_used: {str(e)}")
             return False
     
     def get_proxy_stats(self) -> Dict:
-        """Get proxy statistics for monitoring with circuit breaker protection"""
-        def _get_stats():
+        """Get proxy statistics for monitoring"""
+        try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -396,16 +347,13 @@ class DatabaseManager:
                 cursor.close()
                 
                 return dict(stats) if stats else {"error": "No proxy statistics available"}
-        
-        try:
-            return self.circuit_breaker.call(_get_stats)
         except Exception as e:
             logger.error(f"Failed to get proxy statistics: {str(e)}")
             return {"error": str(e)}
     
     def reset_proxy_errors(self, max_error_count: int = 2) -> int:
         """Reset error counts for proxies that might have recovered"""
-        def _reset():
+        try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -425,9 +373,6 @@ class DatabaseManager:
                     logger.info(f"Reset error counts for {count} proxies")
                 
                 return count
-        
-        try:
-            return self.circuit_breaker.call(_reset)
         except Exception as e:
             logger.error(f"Failed to reset proxy errors: {str(e)}")
             return 0 
