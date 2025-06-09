@@ -65,6 +65,11 @@ async function loadSystemStatus() {
         
         console.log('Configuration status:', statusData);
         
+        // Load current database configuration into form fields (if exists and not auto-configured)
+        if (!autoDetectData.database_auto_configured && statusData.database && statusData.database.configured) {
+            await loadCurrentDatabaseConfig();
+        }
+        
         // Update all status indicators - use auto-detect data for database status
         updateApiStatus(statusData.scrapegraph);
         updateDatabaseStatus(autoDetectData);
@@ -99,6 +104,41 @@ function fillDatabaseFields(config) {
         passwordField.placeholder = 'Auto-configured from environment';
         passwordField.value = 'auto_configured_placeholder'; // Hidden placeholder value
         passwordField.disabled = false; // Keep it editable
+    }
+}
+
+// Load current database configuration from backend
+async function loadCurrentDatabaseConfig() {
+    try {
+        const response = await fetch('/api/config/database');
+        if (response.ok) {
+            const config = await response.json();
+            console.log('Loading current database config:', config);
+            
+            if (config.configured) {
+                // Fill form fields with current saved configuration
+                const hostField = document.getElementById('db-host');
+                const portField = document.getElementById('db-port');
+                const nameField = document.getElementById('db-name');
+                const userField = document.getElementById('db-user');
+                const passwordField = document.getElementById('db-password');
+                const tableField = document.getElementById('db-table');
+                
+                if (hostField && config.host) hostField.value = config.host;
+                if (portField && config.port) portField.value = config.port;
+                if (nameField && config.database) nameField.value = config.database;
+                if (userField && config.username) userField.value = config.username;
+                if (passwordField) {
+                    passwordField.placeholder = 'Current password (hidden)';
+                    passwordField.value = ''; // Leave empty but indicate password exists
+                }
+                if (tableField && config.table) tableField.value = config.table;
+                
+                console.log('Database form fields populated with saved configuration');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading current database config:', error);
     }
 }
 
@@ -199,6 +239,12 @@ async function saveDatabaseConfig(event) {
         password: document.getElementById('db-password').value,
         table: document.getElementById('db-table').value
     };
+    
+    // Validate required fields
+    if (!config.host || !config.database || !config.username) {
+        showAlert('Please fill in all required fields (Host, Database, Username)', 'danger');
+        return;
+    }
     
     // Handle auto-configured password
     if (config.password === 'auto_configured_placeholder') {
