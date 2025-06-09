@@ -418,7 +418,7 @@
                 },
                 {
                     title: 'Memory Usage',
-                    value: `${data.memory_usage.recent_requests_count}/${data.memory_usage.max_memory_entries}`,
+                    value: `${data.memory_usage.rss_mb || 0} MB (${data.memory_usage.percent || 0}%)`,
                     icon: 'fas fa-memory',
                     color: 'dark'
                 }
@@ -573,22 +573,37 @@
                     }]
                 };
             } else if (data.hourly_today && data.hourly_today.length > 0) {
-                // Today's hourly data
-                labels = data.hourly_today.map(h => h.hour + ':00');
+                // Today's hourly data - create full 24-hour dataset
+                const hourlyData = Array(24).fill(null).map((_, hour) => {
+                    const found = data.hourly_today.find(h => h.hour === hour);
+                    return found || { hour, requests: 0, success_rate: 0 };
+                });
+                
+                labels = hourlyData.map(h => {
+                    const hourStr = h.hour.toString().padStart(2, '0');
+                    return `${hourStr}:00`;
+                });
+                
                 chartData = {
                     labels: labels,
                     datasets: [{
                         label: 'Hourly Requests',
-                        data: data.hourly_today.map(h => h.requests),
+                        data: hourlyData.map(h => ({ x: h.hour, y: h.requests })),
                         borderColor: 'rgba(54, 162, 235, 1)',
                         backgroundColor: 'rgba(54, 162, 235, 0.1)',
-                        yAxisID: 'y'
+                        yAxisID: 'y',
+                        tension: 0.1,
+                        pointRadius: 4,
+                        pointHoverRadius: 6
                     }, {
                         label: 'Success Rate (%)',
-                        data: data.hourly_today.map(h => h.success_rate),
+                        data: hourlyData.map(h => ({ x: h.hour, y: h.success_rate })),
                         borderColor: 'rgba(40, 167, 69, 1)',
                         backgroundColor: 'rgba(40, 167, 69, 0.1)',
-                        yAxisID: 'y1'
+                        yAxisID: 'y1',
+                        tension: 0.1,
+                        pointRadius: 4,
+                        pointHoverRadius: 6
                     }]
                 };
             } else {
@@ -605,7 +620,33 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        }
+                    },
                     scales: {
+                        x: {
+                            type: 'linear',
+                            display: true,
+                            position: 'bottom',
+                            title: {
+                                display: true,
+                                text: 'Hour of Day'
+                            },
+                            min: 0,
+                            max: 23,
+                            ticks: {
+                                stepSize: 2,
+                                callback: function(value) {
+                                    return value.toString().padStart(2, '0') + ':00';
+                                }
+                            }
+                        },
                         y: {
                             type: 'linear',
                             display: true,
@@ -626,6 +667,8 @@
                             grid: {
                                 drawOnChartArea: false,
                             },
+                            min: 0,
+                            max: 100
                         }
                     }
                 }
@@ -691,15 +734,15 @@
         function updateSystemHealth(data) {
             const healthContainer = document.getElementById('systemHealth');
             
-            const memoryUsage = (data.memory_usage.recent_requests_count / data.memory_usage.max_memory_entries) * 100;
+            const memoryUsage = data.memory_usage.percent || 0;
             const successRate = data.counters.total_requests > 0 ? 
                 (data.counters.successful_requests / data.counters.total_requests) * 100 : 100;
             
             const healthItems = [
                 {
-                    label: 'Memory Usage',
-                    value: memoryUsage.toFixed(1) + '%',
-                    status: memoryUsage < 80 ? 'good' : memoryUsage < 95 ? 'warning' : 'error'
+                    label: 'Memory Usage (RAM)',
+                    value: `${data.memory_usage.rss_mb || 0} MB (${memoryUsage.toFixed(1)}%)`,
+                    status: memoryUsage < 70 ? 'good' : memoryUsage < 85 ? 'warning' : 'error'
                 },
                 {
                     label: 'Success Rate',
@@ -707,9 +750,9 @@
                     status: successRate > 90 ? 'good' : successRate > 70 ? 'warning' : 'error'
                 },
                 {
-                    label: 'Total Requests',
-                    value: data.counters.total_requests || 0,
-                    status: 'good'
+                    label: 'Request Buffer',
+                    value: `${data.memory_usage.recent_requests_count || 0}/${data.memory_usage.max_memory_entries || 0} (${data.memory_usage.buffer_usage_percent || 0}%)`,
+                    status: (data.memory_usage.buffer_usage_percent || 0) < 80 ? 'good' : (data.memory_usage.buffer_usage_percent || 0) < 95 ? 'warning' : 'error'
                 }
             ];
 

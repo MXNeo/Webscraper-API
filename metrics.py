@@ -4,6 +4,8 @@ import threading
 import sqlite3
 import json
 import os
+import psutil
+import sys
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from collections import defaultdict, deque
@@ -287,6 +289,11 @@ class MetricsCollector:
                     "p99": self._percentile(response_times, 99)
                 }
             
+            # Get actual system memory usage
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_percent = process.memory_percent()
+            
             return {
                 "timestamp": time.time(),
                 "counters": dict(self.counters),
@@ -304,8 +311,12 @@ class MetricsCollector:
                     "methods_used": dict(self.daily_stats["methods_used"])
                 },
                 "memory_usage": {
+                    "rss_mb": round(memory_info.rss / 1024 / 1024, 2),  # Resident Set Size in MB
+                    "vms_mb": round(memory_info.vms / 1024 / 1024, 2),  # Virtual Memory Size in MB
+                    "percent": round(memory_percent, 2),  # Percentage of system memory
                     "recent_requests_count": len(self.recent_requests),
-                    "max_memory_entries": self.max_memory_entries
+                    "max_memory_entries": self.max_memory_entries,
+                    "buffer_usage_percent": round((len(self.recent_requests) / self.max_memory_entries) * 100, 2)
                 }
             }
     

@@ -11,6 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from scrapegraphai.graphs import SmartScraperGraph
 from newspaper import Article
+from newsplease import NewsPlease
 import asyncio
 import concurrent.futures
 import json
@@ -408,7 +409,7 @@ async def save_scrapegraph_config(
     model: str = Form(...),
     api_key: str = Form(None),
     temperature: float = Form(0.0),
-    max_tokens: int = Form(None),
+    max_tokens: str = Form(None),  # Accept as string first, then convert
     base_url: str = Form(None),
     api_version: str = Form(None),
     deployment_name: str = Form(None),
@@ -418,8 +419,15 @@ async def save_scrapegraph_config(
     try:
         # Validate API key format for providers that need it
         if provider in ["openai", "anthropic", "azure"] and api_key:
-            if not api_key.startswith("sk-") or len(api_key) < 20:
-                raise HTTPException(status_code=400, detail="Invalid API key format")
+            # Basic validation - check it's not empty and has reasonable length
+            if len(api_key.strip()) < 10:
+                raise HTTPException(status_code=400, detail="API key appears to be too short")
+            
+            # OpenAI API keys usually start with sk- but not always (e.g., organization keys)
+            # Anthropic keys start with sk-ant-
+            # Azure keys are different format
+            # Let's be more lenient with validation
+            api_key = api_key.strip()
         
         config = {
             "provider": provider,
@@ -430,8 +438,11 @@ async def save_scrapegraph_config(
         
         if api_key:
             config["api_key"] = api_key
-        if max_tokens:
-            config["max_tokens"] = max_tokens
+        if max_tokens and max_tokens.strip():
+            try:
+                config["max_tokens"] = int(max_tokens.strip())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Max tokens must be a valid number")
         if base_url:
             config["base_url"] = base_url
         if api_version:
@@ -567,6 +578,25 @@ async def save_database_config(request: DatabaseConfigRequest):
             password=password,
             port=request.port
         )
+        
+        # Update the config store to reflect the new database configuration
+        config_store["database"] = {
+            "host": request.host,
+            "port": request.port,
+            "database": request.database,
+            "username": request.username,
+            "password": password,
+            "table": request.table
+        }
+        
+        # Clear previous test results
+        config_store["last_db_test"] = None
+        config_store["last_proxy_test"] = None
+        
+        # Reset database manager connection pool to use new config
+        db_manager.disconnect()
+        
+        logger.info(f"Database configuration saved and config store updated: {request.host}:{request.port}")
         
         return {"success": True, "message": "Database configuration saved successfully"}
         
@@ -976,7 +1006,7 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                         'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Accept-Encoding': 'gzip, deflate',  # Let requests handle decompression
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1',
                         'Sec-Fetch-Dest': 'document',
@@ -1012,11 +1042,64 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                     
                     content_length = len(response.content)
                     logger.debug(f"Successfully fetched content, status: {response.status_code}, size: {content_length} bytes")
+                    logger.debug(f"Content-Type: {response.headers.get('content-type', 'unknown')}")
+                    logger.debug(f"Content-Encoding: {response.headers.get('content-encoding', 'none')}")
+                    
+                    # Ensure we have valid text content
+                    try:
+                        # response.text handles encoding/decoding automatically
+                        html_content = response.text
+                        if not html_content or len(html_content.strip()) == 0:
+                            raise ValueError("Empty HTML content received")
+                        
+                        # Check if content looks like HTML
+                        if not ('<html' in html_content.lower() or '<div' in html_content.lower() or '<body' in html_content.lower()):
+                            logger.warning(f"Content doesn't appear to be HTML. First 200 chars: {repr(html_content[:200])}")
+                        
+                    except UnicodeDecodeError as e:
+                        logger.error(f"Unicode decode error: {e}")
+                        # Try with different encoding
+                        html_content = response.content.decode('utf-8', errors='ignore')
                     
                     # Create article and set the HTML content
                     article = Article(url)
-                    article.download(input_html=response.text)
+                    article.download(input_html=html_content)
                     article.parse()
+                    
+                    # DEBUG: Log detailed article extraction results
+                    logger.info(f"[DEBUG] Newspaper4k extraction results for {url}:")
+                    logger.info(f"[DEBUG] - Title: {repr(getattr(article, 'title', None))}")
+                    logger.info(f"[DEBUG] - Text length: {len(getattr(article, 'text', '') or '')}")
+                    article_text = getattr(article, 'text', None)
+                    logger.info(f"[DEBUG] - Text preview: {repr(article_text[:200]) if article_text else 'None'}")
+                    logger.info(f"[DEBUG] - Top image: {repr(getattr(article, 'top_image', None))}")
+                    logger.info(f"[DEBUG] - Publish date: {repr(getattr(article, 'publish_date', None))}")
+                    authors = getattr(article, 'authors', None)
+                    logger.info(f"[DEBUG] - Authors: {repr(list(authors)) if authors else 'None'}")
+                    summary = getattr(article, 'summary', None)
+                    logger.info(f"[DEBUG] - Summary length: {len(summary) if summary else 0}")
+                    
+                    # Check if extraction actually succeeded
+                    if not article_text or len(article_text.strip()) == 0:
+                        logger.warning(f"[DEBUG] Newspaper4k extracted no content for {url}")
+                        logger.warning(f"[DEBUG] HTML response length: {len(html_content)}")
+                        logger.warning(f"[DEBUG] HTML preview: {repr(html_content[:500])}")
+                        
+                        # Try alternative parsing approach
+                        try:
+                            # Try parsing again with different settings
+                            article.config.fetch_images = False
+                            article.config.memoize_articles = False
+                            article.parse()
+                            
+                            updated_text = getattr(article, 'text', None)
+                            if updated_text and len(updated_text.strip()) > 0:
+                                logger.info(f"[DEBUG] Alternative parsing successful, got {len(updated_text)} characters")
+                                article_text = updated_text  # Update for final result
+                            else:
+                                logger.warning(f"[DEBUG] Alternative parsing also failed")
+                        except Exception as e:
+                            logger.warning(f"[DEBUG] Alternative parsing error: {str(e)}")
                     
                     # Mark proxy as successful if used
                     if selected_proxy:
@@ -1024,16 +1107,24 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                         logger.debug(f"Marked proxy {selected_proxy.id} as successful for request {request_id}")
                     
                     # Standardize output to match ScrapGraph AI format
+                    article_title = getattr(article, 'title', None)
+                    article_top_image = getattr(article, 'top_image', None)
+                    article_publish_date = getattr(article, 'publish_date', None)
+                    article_authors = getattr(article, 'authors', None)
+                    article_summary = getattr(article, 'summary', None)
+                    
                     result = {
-                        "content": article.text if article.text else "",
-                        "top_image": article.top_image,
-                        "published": article.publish_date.isoformat() if article.publish_date else None,
-                        "title": article.title if hasattr(article, 'title') else None,
-                        "authors": list(article.authors) if hasattr(article, 'authors') else [],
-                        "summary": article.summary if hasattr(article, 'summary') else None
+                        "content": article_text or "",
+                        "top_image": article_top_image if article_top_image else None,
+                        "published": article_publish_date.isoformat() if article_publish_date else None,
+                        "title": article_title if article_title else None,
+                        "authors": list(article_authors) if article_authors else [],
+                        "summary": article_summary if article_summary else None
                     }
                     
-                    logger.info(f"Successfully scraped article: content_length={len(result['content'])}, title='{result.get('title', 'N/A')[:50]}...', attempt={attempt + 1}")
+                    title_for_log = result.get('title') or 'N/A'
+                    title_preview = title_for_log[:50] if title_for_log != 'N/A' else 'N/A'
+                    logger.info(f"Successfully scraped article: content_length={len(result['content'])}, title='{title_preview}...', attempt={attempt + 1}")
                     return result
                     
                 except requests.exceptions.ProxyError as e:
@@ -1154,6 +1245,296 @@ async def scrape_with_newspaper(request: ScrapeRequest):
         )
         
         logger.error(f"Newspaper scraping failed completely: {str(e)}")
+        return ScrapeResponse(
+            url=str(request.url),
+            content={},
+            status="error",
+            error=str(e),
+            proxy_used=proxy_info
+        )
+
+@app.post("/api/scrape/newsplease")
+async def scrape_with_newsplease(request: ScrapeRequest):
+    """Scrape using news-please with enhanced proxy pool support and retry logic"""
+    start_time = time.time()
+    url = str(request.url)
+    request_id = str(uuid.uuid4())  # Unique ID for this request
+    selected_proxy = None
+    error_type = None
+    content_length = 0
+    attempt_count = 0
+    
+    try:
+        logger.info(f"Received news-please scrape request for URL: {url} (request_id: {request_id})")
+        
+        # Check if proxy should be used
+        use_proxy = request.use_proxy or config_store.get("proxy_enabled", False)
+        max_retries = config_store.get("proxy_retry_count", 3)
+        request_timeout = config_store.get("request_timeout", 15)
+        
+        # Define the scraping function with enhanced retry logic
+        def run_newsplease_scraper():
+            nonlocal selected_proxy, error_type, content_length, attempt_count
+            
+            last_error = None
+            
+            for attempt in range(max_retries + 1):  # +1 for no-proxy fallback
+                attempt_count = attempt + 1
+                try:
+                    # Determine if we should use proxy on this attempt
+                    use_proxy_this_attempt = use_proxy and attempt < max_retries
+                    
+                    if use_proxy_this_attempt and config_store["database"]:
+                        # Get a proxy from the pool for this specific request
+                        selected_proxy = proxy_retry_manager.get_proxy_for_request(request_id)
+                        if selected_proxy:
+                            logger.info(f"Attempt {attempt + 1}: Using proxy {selected_proxy.id}: {selected_proxy.address}:{selected_proxy.port}")
+                        else:
+                            logger.warning(f"Attempt {attempt + 1}: No proxies available, proceeding without proxy")
+                            use_proxy_this_attempt = False
+                    else:
+                        if attempt == max_retries:
+                            logger.info(f"Attempt {attempt + 1}: Fallback to direct connection (no proxy)")
+                        selected_proxy = None
+                    
+                    # Configure proxy settings for news-please if available
+                    proxy_config = None
+                    if selected_proxy and use_proxy_this_attempt:
+                        # news-please uses different proxy configuration
+                        proxy_config = {
+                            'http': selected_proxy.proxy_url,
+                            'https': selected_proxy.proxy_url
+                        }
+                        logger.debug(f"Using proxy URL: {selected_proxy.address}:{selected_proxy.port}")
+                    
+                    # Configure news-please parameters
+                    # news-please doesn't have direct proxy support in from_urls, so we'll use requests with proxy first
+                    if proxy_config:
+                        # Manual request with proxy, then parse with news-please
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'none',
+                            'Cache-Control': 'max-age=0'
+                        }
+                        
+                        logger.debug(f"Fetching URL with proxy: {url}")
+                        response = requests.get(
+                            url,
+                            headers=headers,
+                            proxies=proxy_config,
+                            timeout=request_timeout,
+                            allow_redirects=True,
+                            verify=True
+                        )
+                        response.raise_for_status()
+                        
+                        content_length = len(response.content)
+                        logger.debug(f"Successfully fetched content via proxy, status: {response.status_code}, size: {content_length} bytes")
+                        
+                        # Parse the content with news-please from HTML
+                        article = NewsPlease.from_html(response.text, url=url)
+                        
+                        # DEBUG: Log what we got from news-please via proxy
+                        logger.info(f"[DEBUG] news-please (proxy) extraction results for {url}:")
+                        logger.info(f"[DEBUG] - Article type: {type(article)}")
+                        logger.info(f"[DEBUG] - Article object: {repr(article)}")
+                        
+                    else:
+                        # Direct news-please extraction without proxy
+                        logger.debug(f"Fetching URL directly with news-please: {url}")
+                        articles = NewsPlease.from_urls([url])
+                        article = articles.get(url)
+                        
+                        # DEBUG: Log what we got from news-please direct
+                        logger.info(f"[DEBUG] news-please (direct) extraction results for {url}:")
+                        logger.info(f"[DEBUG] - Articles dict: {type(articles)}")
+                        logger.info(f"[DEBUG] - Article for URL: {type(article)}")
+                        logger.info(f"[DEBUG] - Article object: {repr(article)}")
+                        
+                        if article is None:
+                            raise Exception(f"news-please could not extract article from {url}")
+                        
+                        # Only try to get maintext if it's an actual article object
+                        if hasattr(article, 'maintext'):
+                            content_length = len(article.maintext) if article.maintext else 0
+                            logger.debug(f"Successfully extracted content, size: {content_length} characters")
+                        else:
+                            logger.warning(f"[DEBUG] Article object has no maintext attribute: {dir(article)}")
+                    
+                    # Mark proxy as successful if used
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_success_for_request(request_id, selected_proxy)
+                        logger.debug(f"Marked proxy {selected_proxy.id} as successful for request {request_id}")
+                    
+                    # Check if article extraction was successful
+                    if article is None:
+                        raise Exception("news-please could not extract article content")
+                    
+                    # DEBUG: Log all available attributes
+                    logger.info(f"[DEBUG] Available attributes on article: {dir(article)}")
+                    
+                    # Handle different response types from news-please
+                    if hasattr(article, 'maintext'):
+                        # It's a proper Article object
+                        logger.info(f"[DEBUG] Article object - maintext length: {len(article.maintext) if article.maintext else 0}")
+                        result = {
+                            "content": article.maintext if article.maintext else "",
+                            "title": article.title if hasattr(article, 'title') and article.title else None,
+                            "published": article.date_publish.isoformat() if hasattr(article, 'date_publish') and article.date_publish else None,
+                            "authors": [article.authors] if hasattr(article, 'authors') and article.authors else [],
+                            "description": article.description if hasattr(article, 'description') and article.description else None,
+                            "language": article.language if hasattr(article, 'language') and article.language else None,
+                            "source_domain": article.source_domain if hasattr(article, 'source_domain') and article.source_domain else None,
+                            "top_image": article.image_url if hasattr(article, 'image_url') and article.image_url else None,
+                            "url": article.url if hasattr(article, 'url') and article.url else url
+                        }
+                    elif isinstance(article, dict):
+                        # It's a dictionary response
+                        logger.info(f"[DEBUG] Dictionary response keys: {list(article.keys())}")
+                        result = {
+                            "content": article.get('maintext', '') or article.get('text', '') or article.get('content', ''),
+                            "title": article.get('title'),
+                            "published": article.get('date_publish'),
+                            "authors": [article.get('authors')] if article.get('authors') else [],
+                            "description": article.get('description'),
+                            "language": article.get('language'),
+                            "source_domain": article.get('source_domain'),
+                            "top_image": article.get('image_url') or article.get('top_image'),
+                            "url": article.get('url', url)
+                        }
+                    else:
+                        logger.error(f"[DEBUG] Unexpected article type: {type(article)}")
+                        raise Exception(f"Unexpected article type: {type(article)}")
+                    
+                    logger.info(f"Successfully scraped article with news-please: content_length={len(result['content'])}, title='{result.get('title', 'N/A')[:50]}...', attempt={attempt + 1}")
+                    return result
+                    
+                except requests.exceptions.ProxyError as e:
+                    last_error = f"Proxy error: {str(e)}"
+                    error_type = "ProxyError"
+                    logger.warning(f"Attempt {attempt + 1} - Proxy error: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                        logger.warning(f"Marked proxy {selected_proxy.id} as failed for request {request_id}")
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    # Short delay before retry
+                    time.sleep(0.5 * (attempt + 1))
+                    
+                except requests.exceptions.Timeout as e:
+                    last_error = f"Request timeout after {request_timeout}s: {str(e)}"
+                    error_type = "Timeout"
+                    logger.warning(f"Attempt {attempt + 1} - Timeout: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+                    
+                except requests.exceptions.ConnectionError as e:
+                    last_error = f"Connection error: {str(e)}"
+                    error_type = "ConnectionError"
+                    logger.warning(f"Attempt {attempt + 1} - Connection error: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+                    
+                except requests.exceptions.HTTPError as e:
+                    last_error = f"HTTP error: {str(e)}"
+                    error_type = "HTTPError"
+                    logger.warning(f"Attempt {attempt + 1} - HTTP error: {str(e)}")
+                    
+                    # Don't retry on 4xx errors (client errors)
+                    if hasattr(e, 'response') and e.response and e.response.status_code >= 400 and e.response.status_code < 500:
+                        raise Exception(last_error)
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+                    
+                except Exception as e:
+                    last_error = f"news-please scraping failed: {str(e)}"
+                    error_type = "UnknownError"
+                    logger.warning(f"Attempt {attempt + 1} - Unexpected error: {str(e)}")
+                    
+                    if selected_proxy:
+                        proxy_retry_manager.mark_proxy_failed_for_request(request_id, selected_proxy)
+                    
+                    if attempt == max_retries:
+                        break
+                    
+                    time.sleep(1.0 * (attempt + 1))
+            
+            # If we get here, all attempts failed
+            raise Exception(f"All {max_retries + 1} attempts failed. Last error: {last_error}")
+        
+        # Run the scraper in a thread pool
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(thread_pool, run_newsplease_scraper)
+        
+        # Record successful metrics
+        duration = time.time() - start_time
+        proxy_info = f"{selected_proxy.address}:{selected_proxy.port}" if selected_proxy else None
+        
+        record_request_metric(
+            url=url,
+            method="newsplease",
+            success=True,
+            duration=duration,
+            proxy_used=proxy_info,
+            content_length=len(result.get('content', '')),
+            attempt_count=attempt_count,
+            request_id=request_id
+        )
+        
+        return ScrapeResponse(
+            url=url,
+            content=result,
+            status="success",
+            proxy_used=proxy_info
+        )
+        
+    except Exception as e:
+        # Record failed metrics
+        duration = time.time() - start_time
+        proxy_info = f"{selected_proxy.address}:{selected_proxy.port}" if selected_proxy else None
+        
+        record_request_metric(
+            url=url,
+            method="newsplease",
+            success=False,
+            duration=duration,
+            proxy_used=proxy_info,
+            error_type=error_type,
+            content_length=content_length,
+            attempt_count=attempt_count,
+            request_id=request_id
+        )
+        
+        logger.error(f"news-please scraping failed for {url}: {str(e)}")
+        
         return ScrapeResponse(
             url=str(request.url),
             content={},
@@ -1695,9 +2076,24 @@ class WebSocketLogHandler(logging.Handler):
                 log_entry['request_id'] = record.request_id
             
             # Send to WebSocket clients (non-blocking)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If we're in an async context, schedule the task
             asyncio.create_task(self.log_manager.broadcast_log(log_entry))
-        except:
-            pass  # Don't let logging errors break the application
+                else:
+                    # If not in async context, run it directly
+                    loop.run_until_complete(self.log_manager.broadcast_log(log_entry))
+            except Exception:
+                # Fallback: add to log manager buffer directly
+                self.log_manager.log_buffer.append(log_entry)
+                if len(self.log_manager.log_buffer) > self.log_manager.max_buffer_size:
+                    self.log_manager.log_buffer = self.log_manager.log_buffer[-self.log_manager.max_buffer_size:]
+                
+        except Exception as e:
+            # Don't let logging errors break the application, but try to capture them
+            print(f"WebSocket log handler error: {e}")
+            pass
 
 # Add WebSocket handler to root logger
 websocket_handler = WebSocketLogHandler(log_manager)
@@ -1708,6 +2104,8 @@ logging.getLogger().addHandler(websocket_handler)
 async def websocket_logs(websocket: WebSocket):
     """WebSocket endpoint for live log streaming"""
     await log_manager.connect(websocket)
+    logger.info(f"New WebSocket client connected for logs. Total connections: {len(log_manager.connections)}")
+    
     try:
         while True:
             # Keep connection alive and listen for client messages
@@ -1719,11 +2117,34 @@ async def websocket_logs(websocket: WebSocket):
                 if command.get("type") == "filter":
                     # TODO: Implement log filtering
                     pass
+                elif command.get("type") == "test":
+                    # Generate test logs
+                    logger.info("Test log message from WebSocket client")
+                    logger.warning("Test warning message")
+                    logger.error("Test error message")
             except json.JSONDecodeError:
-                pass
+                # If not JSON, treat as a test message request
+                if message == "test":
+                    logger.info("Test log message requested via WebSocket")
             
     except WebSocketDisconnect:
+        logger.info(f"WebSocket client disconnected from logs. Remaining connections: {len(log_manager.connections) - 1}")
         log_manager.disconnect(websocket)
+
+# Test endpoint to generate logs
+@app.get("/api/logs/test")
+async def test_logs():
+    """Generate test log messages for debugging"""
+    logger.info("Test INFO log message generated")
+    logger.warning("Test WARNING log message generated") 
+    logger.error("Test ERROR log message generated")
+    logger.debug("Test DEBUG log message generated")
+    
+    return {
+        "message": "Test logs generated",
+        "active_connections": len(log_manager.connections),
+        "buffer_size": len(log_manager.log_buffer)
+    }
 
 @app.get("/api/deployment/info")
 async def get_deployment_info():
@@ -1863,12 +2284,12 @@ async def initialize_database():
             db_config = config_instance.get_database_config()
         
         if not db_config:
-            return {"error": "Database not configured. Please configure database connection first."}
+            return {"success": False, "error": "Database not configured. Please configure database connection first."}
         
         # Test connection first
         db_test_result, db_test_message = db_manager.test_connection()
         if not db_test_result:
-            return {"error": f"Database connection failed: {db_test_message}"}
+            return {"success": False, "error": f"Database connection failed: {db_test_message}"}
         
         # Use the existing database manager to create the table
         with db_manager.get_connection() as conn:
@@ -1984,7 +2405,7 @@ async def initialize_database():
             
     except Exception as e:
         logger.error(f"Database initialization failed: {str(e)}", exc_info=True)
-        return {"error": f"Database initialization failed: {str(e)}"}
+        return {"success": False, "error": f"Database initialization failed: {str(e)}"}
 
 @app.post("/api/database/test")
 async def test_database_connection(request: DatabaseConfigRequest):
