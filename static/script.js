@@ -21,7 +21,14 @@ function setupFormHandlers() {
     // Initialize DB button
     const initializeBtn = document.getElementById('initialize-db-btn');
     if (initializeBtn) {
-        initializeBtn.addEventListener('click', initializeDatabase);
+        console.log('Initialize button found, adding event listener');
+        initializeBtn.addEventListener('click', function(event) {
+            console.log('Initialize button clicked');
+            event.preventDefault();
+            initializeDatabase();
+        });
+    } else {
+        console.log('Initialize button not found during setup');
     }
     
     // Test connection button
@@ -201,6 +208,27 @@ async function saveDatabaseConfig(event) {
     }
     
     try {
+        // First test the connection
+        const testResponse = await fetch('/api/config/database/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                host: config.host,
+                port: config.port,
+                database: config.database,
+                username: config.username,
+                password: config.password
+            })
+        });
+        
+        const testResult = await testResponse.json();
+        
+        if (!testResponse.ok || !testResult.success) {
+            showAlert(`Database connection test failed: ${testResult.message || 'Unknown error'}`, 'danger');
+            return;
+        }
+        
+        // If test passed, save the configuration
         const response = await fetch('/api/database/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -210,13 +238,27 @@ async function saveDatabaseConfig(event) {
         const result = await response.json();
         
         if (response.ok) {
-            showAlert('Database configuration saved successfully!', 'success');
-            loadSystemStatus(); // Refresh status
+            showAlert('Database configuration saved and tested successfully!', 'success');
+            // Update the config store to reflect the new database connection
+            await updateConfigStore();
+            // Refresh status to show updated connection state
+            await loadSystemStatus();
         } else {
             showAlert(`Database configuration failed: ${result.error}`, 'danger');
         }
     } catch (error) {
         showAlert(`Error saving database configuration: ${error.message}`, 'danger');
+    }
+}
+
+// Helper function to update config store
+async function updateConfigStore() {
+    try {
+        const response = await fetch('/api/config/status');
+        const statusData = await response.json();
+        // This will trigger the backend to refresh its internal status
+    } catch (error) {
+        console.error('Error updating config store:', error);
     }
 }
 
@@ -280,33 +322,69 @@ async function testDatabaseConnection() {
 
 // Initialize database (create tables)
 async function initializeDatabase() {
+    console.log('Initialize database function called');
+    
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    if (!initializeBtn) {
+        console.error('Initialize button not found');
+        showAlert('Initialize button not found', 'danger');
+        return;
+    }
+    
+    if (initializeBtn.disabled) {
+        console.log('Initialize button is disabled, checking if we can enable it...');
+        // Check if we have a database connection
+        try {
+            const statusResponse = await fetch('/api/config/auto-detect');
+            const statusData = await statusResponse.json();
+            
+            if (statusData.database_connected) {
+                console.log('Database is connected, enabling button');
+                initializeBtn.disabled = false;
+            } else {
+                console.log('Database not connected, cannot initialize');
+                showAlert('Database connection required before initialization. Please configure and test database connection first.', 'warning');
+                return;
+            }
+        } catch (error) {
+            console.error('Error checking database status:', error);
+            showAlert('Unable to check database status. Please refresh the page and try again.', 'danger');
+            return;
+        }
+    }
+    
     if (!confirm('This will create/recreate the proxies table. Continue?')) {
         return;
     }
     
-    const initializeBtn = document.getElementById('initialize-db-btn');
-    const originalText = initializeBtn.textContent;
+    const originalText = initializeBtn.innerHTML;
     initializeBtn.disabled = true;
     initializeBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Initializing...';
     
     try {
+        console.log('Sending request to /api/database/initialize');
         const response = await fetch('/api/database/initialize', {
-            method: 'POST'
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
         });
         
         const result = await response.json();
+        console.log('Initialize response:', result);
         
-        if (response.ok) {
+        if (response.ok && result.success) {
             showAlert('Database initialized successfully!', 'success');
-            loadSystemStatus(); // Refresh status
+            await loadSystemStatus(); // Refresh status
         } else {
-            showAlert(`Database initialization failed: ${result.error}`, 'danger');
+            showAlert(`Database initialization failed: ${result.error || 'Unknown error'}`, 'danger');
         }
     } catch (error) {
+        console.error('Error initializing database:', error);
         showAlert(`Error initializing database: ${error.message}`, 'danger');
     } finally {
         initializeBtn.disabled = false;
-        initializeBtn.textContent = originalText;
+        initializeBtn.innerHTML = originalText;
     }
 }
 
@@ -603,12 +681,39 @@ function toggleProviderFields() {
 async function saveScrapeGraphConfig(event) {
     event.preventDefault();
     
+    // Get form values
+    const provider = document.getElementById('provider').value;
+    const model = document.getElementById('model').value;
+    const apiKey = document.getElementById('api-key').value;
+    const temperature = document.getElementById('temperature').value;
+    const maxTokens = document.getElementById('max-tokens').value;
+    
+    // Basic frontend validation
+    if (!provider) {
+        showAlert('Please select a provider', 'warning');
+        return;
+    }
+    
+    if (!model) {
+        showAlert('Please enter a model name', 'warning');
+        return;
+    }
+    
+    if (provider !== 'ollama' && (!apiKey || apiKey.trim().length < 10)) {
+        showAlert('Please enter a valid API key (at least 10 characters)', 'warning');
+        return;
+    }
+    
     const formData = new FormData();
-    formData.append('provider', document.getElementById('provider').value);
-    formData.append('model', document.getElementById('model').value);
-    formData.append('api_key', document.getElementById('api-key').value);
-    formData.append('temperature', document.getElementById('temperature').value);
-    formData.append('max_tokens', document.getElementById('max-tokens').value);
+    formData.append('provider', provider);
+    formData.append('model', model);
+    formData.append('api_key', apiKey.trim());
+    formData.append('temperature', temperature);
+    
+    // Only add max_tokens if it has a value
+    if (maxTokens && maxTokens.trim()) {
+        formData.append('max_tokens', maxTokens.trim());
+    }
     
     try {
         const response = await fetch('/api/config/scrapegraph', {
@@ -622,7 +727,18 @@ async function saveScrapeGraphConfig(event) {
             showAlert('ScrapeGraph AI configuration saved successfully!', 'success');
             await loadSystemStatus();
         } else {
-            throw new Error(data.detail || 'Failed to save configuration');
+            // Handle different types of errors
+            let errorMessage = 'Failed to save configuration';
+            
+            if (data.detail) {
+                errorMessage = data.detail;
+            } else if (data.error) {
+                errorMessage = data.error;
+            } else if (data.message) {
+                errorMessage = data.message;
+            }
+            
+            throw new Error(errorMessage);
         }
         
     } catch (error) {
@@ -743,7 +859,14 @@ async function scrapeWithMethod(method) {
     resultsDiv.style.display = 'block';
     
     try {
-        const endpoint = method === 'scrapegraph' ? '/api/scrape/scrapegraph' : '/api/scrape/newspaper';
+        let endpoint;
+        if (method === 'scrapegraph') {
+            endpoint = '/api/scrape/scrapegraph';
+        } else if (method === 'newsplease') {
+            endpoint = '/api/scrape/newsplease';
+        } else {
+            endpoint = '/api/scrape/newspaper';
+        }
         
         const response = await fetch(endpoint, {
             method: 'POST',
@@ -787,7 +910,7 @@ function formatScrapingResults(data, method) {
     // Build the enhanced result HTML
     let resultHtml = `
         <div class="alert alert-success mb-3">
-            <strong>Success!</strong> Content scraped using ${method}
+            <strong>Success!</strong> Content scraped using ${method === 'newsplease' ? 'News-Please' : method === 'scrapegraph' ? 'ScrapeGraph AI' : 'Newspaper4k'}
         </div>
         
         <!-- Request Info -->
@@ -799,7 +922,7 @@ function formatScrapingResults(data, method) {
                 <div class="row">
                     <div class="col-md-6">
                         <strong>URL:</strong> <small class="text-muted">${data.url}</small><br>
-                        <strong>Method:</strong> ${method}<br>
+                        <strong>Method:</strong> ${method === 'newsplease' ? 'News-Please' : method === 'scrapegraph' ? 'ScrapeGraph AI' : 'Newspaper4k'}<br>
                         <strong>Proxy Used:</strong> ${data.proxy_used || 'None'}
                     </div>
                     <div class="col-md-6">
@@ -862,7 +985,10 @@ function formatScrapingResults(data, method) {
                          class="img-fluid rounded" 
                          style="width: 100%; max-height: 200px; object-fit: cover;"
                          alt="Article image"
-                         onerror="this.parentElement.innerHTML='<div class=\\"text-muted text-center py-3\\"><i class=\\"fas fa-image-slash\\"></i><br>Image failed to load</div>'">
+                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                    <div class="text-muted text-center py-3" style="display: none;">
+                        <i class="fas fa-image-slash"></i><br>Image failed to load
+                    </div
                 </div>
             </div>
         `;
@@ -991,4 +1117,42 @@ function showAlert(message, type) {
             }
         }, 5000);
     }
+}
+
+// Debug function to test button functionality - call from browser console: debugInitializeButton()
+function debugInitializeButton() {
+    console.log('=== Initialize Button Debug ===');
+    
+    const initializeBtn = document.getElementById('initialize-db-btn');
+    if (initializeBtn) {
+        console.log('✓ Button found:', initializeBtn);
+        console.log('  - Disabled:', initializeBtn.disabled);
+        console.log('  - Classes:', initializeBtn.className);
+        console.log('  - innerHTML:', initializeBtn.innerHTML);
+        console.log('  - Style display:', initializeBtn.style.display);
+        console.log('  - Computed display:', window.getComputedStyle(initializeBtn).display);
+        
+        // Check if the button has event listeners
+        console.log('  - Event listeners attached:', initializeBtn.onclick !== null || initializeBtn.getAttribute('onclick') !== null);
+        
+        // Test if click event works
+        console.log('Manual click test...');
+        try {
+            initializeBtn.click();
+            console.log('✓ Click event triggered successfully');
+        } catch (error) {
+            console.error('✗ Click event failed:', error);
+        }
+    } else {
+        console.error('✗ Button NOT found with ID "initialize-db-btn"');
+        
+        // Check for similar buttons
+        const allButtons = document.querySelectorAll('button');
+        console.log('All buttons on page:', allButtons);
+        
+        const initButtons = document.querySelectorAll('button[id*="init"], button[class*="init"]');
+        console.log('Buttons with "init" in ID or class:', initButtons);
+    }
+    
+    console.log('=== End Debug ===');
 } 
