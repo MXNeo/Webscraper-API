@@ -70,9 +70,15 @@ async function loadSystemStatus() {
             await loadCurrentDatabaseConfig();
         }
         
-        // Update all status indicators - merge auto-detect and status data for database
+        // Get simple database status (this is the key fix!)
+        const dbStatusResponse = await fetch('/api/database/simple-status');
+        const dbStatusData = await dbStatusResponse.json();
+        
+        console.log('Simple database status:', dbStatusData);
+        
+        // Update all status indicators
         updateApiStatus(statusData.scrapegraph);
-        updateDatabaseStatus(autoDetectData, statusData.database);
+        updateSimpleDatabaseStatus(dbStatusData);
         updateProxyStatus(statusData.proxy);
         
     } catch (error) {
@@ -285,8 +291,6 @@ async function saveDatabaseConfig(event) {
         
         if (response.ok) {
             showAlert('Database configuration saved and tested successfully!', 'success');
-            // Update the config store to reflect the new database connection
-            await updateConfigStore();
             // Refresh status to show updated connection state
             await loadSystemStatus();
         } else {
@@ -297,16 +301,7 @@ async function saveDatabaseConfig(event) {
     }
 }
 
-// Helper function to update config store
-async function updateConfigStore() {
-    try {
-        const response = await fetch('/api/config/status');
-        const statusData = await response.json();
-        // This will trigger the backend to refresh its internal status
-    } catch (error) {
-        console.error('Error updating config store:', error);
-    }
-}
+
 
 // Test database connection
 async function testDatabaseConnection() {
@@ -353,11 +348,8 @@ async function testDatabaseConnection() {
         if (response.ok) {
             showAlert('Database connection successful!', 'success');
             
-            // Enable initialize button for successful manual connections
-            const initializeBtn = document.getElementById('initialize-db-btn');
-            initializeBtn.disabled = false;
-            
-            loadSystemStatus(); // Refresh status
+            // Refresh status to show updated connection state
+            await loadSystemStatus();
         } else {
             showAlert(`Database connection failed: ${result.error}`, 'danger');
         }
@@ -515,8 +507,8 @@ function updateApiStatus(apiConfig) {
     }
 }
 
-// Update database status with auto-detection support
-function updateDatabaseStatus(autoDetectData, manualDbConfig) {
+// Simple database status update function
+function updateSimpleDatabaseStatus(dbStatus) {
     const statusElement = document.getElementById('database-status');
     const statusBadge = document.getElementById('db-connection-status');
     const initializeBtn = document.getElementById('initialize-db-btn');
@@ -524,83 +516,33 @@ function updateDatabaseStatus(autoDetectData, manualDbConfig) {
     const statusJson = document.getElementById('db-status-json');
     
     let badgeClass = 'badge bg-warning';
-    let text = 'Not Connected';
+    let text = 'Not Configured';
     let details = '';
     
-    // Check auto-configured first (Docker Compose mode)
-    if (autoDetectData.database_auto_configured) {
-        if (autoDetectData.database_connected) {
-            if (autoDetectData.table_exists) {
-                badgeClass = 'badge bg-success';
-                text = 'Ready (Auto-configured)';
-                details = `Connected to ${autoDetectData.db_host}:${autoDetectData.db_port}/${autoDetectData.db_name} - Table exists with complete schema`;
-                
-                // Enable reinitialize button
-                if (initializeBtn) {
-                    initializeBtn.disabled = false;
-                    initializeBtn.textContent = 'Reinitialize Database';
-                    initializeBtn.className = 'btn btn-warning';
-                    initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
-                }
-            } else {
-                badgeClass = 'badge bg-warning';
-                text = 'Connected (Auto-configured)';
-                details = `Connected to ${autoDetectData.db_host}:${autoDetectData.db_port}/${autoDetectData.db_name} - Table missing`;
-                
-                // Enable initialize button
-                if (initializeBtn) {
-                    initializeBtn.disabled = false;
-                    initializeBtn.textContent = 'Initialize Database';
-                    initializeBtn.className = 'btn btn-success';
-                    initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Initialize Database';
-                }
-            }
-        } else {
-            badgeClass = 'badge bg-danger';
-            text = 'Connection Failed';
-            details = autoDetectData.connection_message || 'Database connection failed';
-            
-            if (initializeBtn) {
-                initializeBtn.disabled = true;
-            }
-        }
-    } 
-    // Check manually configured database (Kubernetes/standalone mode)
-    else if (manualDbConfig && manualDbConfig.configured && manualDbConfig.status === 'ready') {
+    // Simple status logic based on the endpoint response
+    if (dbStatus.working) {
         badgeClass = 'badge bg-success';
         text = 'Ready';
-        details = `Connected to database - ${manualDbConfig.available_proxies} proxies available`;
+        details = dbStatus.message;
         
-        // Enable reinitialize button for manual config too
+        // Enable initialize button when database is working
         if (initializeBtn) {
             initializeBtn.disabled = false;
-            initializeBtn.textContent = 'Reinitialize Database';
             initializeBtn.className = 'btn btn-warning';
             initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
         }
-    }
-    // Check if database is configured but might have issues
-    else if (manualDbConfig && manualDbConfig.configured) {
-        if (manualDbConfig.status === 'error') {
+    } else {
+        if (dbStatus.status === 'not_configured') {
+            badgeClass = 'badge bg-warning';
+            text = 'Not Configured';
+            details = 'Please configure database connection';
+        } else if (dbStatus.status === 'error') {
             badgeClass = 'badge bg-danger';
             text = 'Connection Error';
-            details = manualDbConfig.message || 'Database connection failed';
-        } else {
-            badgeClass = 'badge bg-warning'; 
-            text = 'Configured';
-            details = manualDbConfig.message || 'Database configured but status unknown';
+            details = dbStatus.message;
         }
         
-        if (initializeBtn) {
-            initializeBtn.disabled = true;
-        }
-    }
-    // No configuration at all
-    else {
-        badgeClass = 'badge bg-warning';
-        text = 'Not Configured';
-        details = 'Manual database configuration required';
-        
+        // Disable initialize button when database is not working
         if (initializeBtn) {
             initializeBtn.disabled = true;
         }
@@ -613,7 +555,7 @@ function updateDatabaseStatus(autoDetectData, manualDbConfig) {
     }
     
     if (statusBadge) {
-        statusBadge.className = badgeClass;
+        statusBadge.className = badgeClass + ' ms-2';
         statusBadge.textContent = text;
     }
     
@@ -623,7 +565,7 @@ function updateDatabaseStatus(autoDetectData, manualDbConfig) {
     }
     
     if (statusJson) {
-        statusJson.textContent = JSON.stringify(autoDetectData, null, 2);
+        statusJson.textContent = JSON.stringify(dbStatus, null, 2);
         if (statusJson.parentElement) {
             statusJson.parentElement.style.display = 'block';
         }
