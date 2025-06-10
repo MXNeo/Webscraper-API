@@ -7,7 +7,7 @@ set -e
 
 # Configuration
 IMAGE_NAME="neoexec/webscraper-api"
-VERSION="1.4.0"
+VERSION="1.4.1"
 PLATFORMS="linux/amd64,linux/arm64"
 
 echo "🚀 Building multi-platform WebScraper API Docker image"

@@ -363,9 +363,6 @@ async def get_config_status():
             
             db_test_result, db_test_message = db_manager.test_connection()
             if db_test_result:
-                db_status = "connected"
-                db_message = db_test_message
-                
                 # Test proxy table if database is connected
                 proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
                 config_store["last_proxy_test"] = {
@@ -374,6 +371,10 @@ async def get_config_status():
                     "proxy_count": proxy_count,
                     "timestamp": time.time()
                 }
+                
+                # Use "configured" status like ScrapeGraph for consistency
+                db_status = "configured"
+                db_message = f"Database ready - {proxy_count} proxies available"
             else:
                 db_status = "error"
                 db_message = db_test_message
