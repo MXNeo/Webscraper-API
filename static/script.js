@@ -70,15 +70,9 @@ async function loadSystemStatus() {
             await loadCurrentDatabaseConfig();
         }
         
-        // Get simple database status (this is the key fix!)
-        const dbStatusResponse = await fetch('/api/database/simple-status');
-        const dbStatusData = await dbStatusResponse.json();
-        
-        console.log('Simple database status:', dbStatusData);
-        
-        // Update all status indicators
+        // Update all status indicators using the same approach as ScrapeGraph
         updateApiStatus(statusData.scrapegraph);
-        updateSimpleDatabaseStatus(dbStatusData);
+        updateDatabaseStatus(statusData.database);
         updateProxyStatus(statusData.proxy);
         
     } catch (error) {
@@ -507,67 +501,36 @@ function updateApiStatus(apiConfig) {
     }
 }
 
-// Simple database status update function
-function updateSimpleDatabaseStatus(dbStatus) {
+// Database status update function (same pattern as ScrapeGraph API)
+function updateDatabaseStatus(dbConfig) {
     const statusElement = document.getElementById('database-status');
-    const statusBadge = document.getElementById('db-connection-status');
-    const initializeBtn = document.getElementById('initialize-db-btn');
-    const statusDetails = document.getElementById('db-status-details');
-    const statusJson = document.getElementById('db-status-json');
+    const detailsElement = document.getElementById('database-details');
     
-    let badgeClass = 'badge bg-warning';
-    let text = 'Not Configured';
-    let details = '';
-    
-    // Simple status logic based on the endpoint response
-    if (dbStatus.working) {
-        badgeClass = 'badge bg-success';
-        text = 'Ready';
-        details = dbStatus.message;
-        
-        // Enable initialize button when database is working
-        if (initializeBtn) {
-            initializeBtn.disabled = false;
-            initializeBtn.className = 'btn btn-warning';
-            initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
-        }
-    } else {
-        if (dbStatus.status === 'not_configured') {
-            badgeClass = 'badge bg-warning';
-            text = 'Not Configured';
-            details = 'Please configure database connection';
-        } else if (dbStatus.status === 'error') {
-            badgeClass = 'badge bg-danger';
-            text = 'Connection Error';
-            details = dbStatus.message;
-        }
-        
-        // Disable initialize button when database is not working
-        if (initializeBtn) {
-            initializeBtn.disabled = true;
-        }
-    }
-    
-    // Update status elements
     if (statusElement) {
+        let badgeClass = 'badge bg-warning';
+        let text = 'Not Configured';
+        
+        switch(dbConfig.status) {
+            case 'configured':
+                badgeClass = 'badge bg-success';
+                text = 'Ready';
+                break;
+            case 'error':
+                badgeClass = 'badge bg-danger';
+                text = 'Error';
+                break;
+        }
+        
         statusElement.className = badgeClass;
         statusElement.textContent = text;
     }
     
-    if (statusBadge) {
-        statusBadge.className = badgeClass + ' ms-2';
-        statusBadge.textContent = text;
-    }
-    
-    if (statusDetails) {
-        statusDetails.textContent = details;
-        statusDetails.style.display = details ? 'block' : 'none';
-    }
-    
-    if (statusJson) {
-        statusJson.textContent = JSON.stringify(dbStatus, null, 2);
-        if (statusJson.parentElement) {
-            statusJson.parentElement.style.display = 'block';
+    if (detailsElement) {
+        if (dbConfig.message) {
+            detailsElement.textContent = dbConfig.message;
+            detailsElement.style.display = 'block';
+        } else {
+            detailsElement.style.display = 'none';
         }
     }
 }
