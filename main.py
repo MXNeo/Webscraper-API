@@ -1885,7 +1885,15 @@ async def get_all_proxies(
         with db_manager.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Build WHERE clause based on filters
+            # Check which columns exist in the table first
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'proxies'
+            """)
+            existing_columns = [row['column_name'] for row in cursor.fetchall()]
+            
+            # Build WHERE clause based on filters and available columns
             where_conditions = []
             params = []
             
@@ -1893,17 +1901,28 @@ async def get_all_proxies(
                 where_conditions.append("status = %s")
                 params.append(status)
             
-            if country:
+            if country and 'country' in existing_columns:
                 where_conditions.append("country = %s")
                 params.append(country)
             
-            if provider:
+            if provider and 'provider' in existing_columns:
                 where_conditions.append("provider ILIKE %s")
                 params.append(f"%{provider}%")
             
             if search:
-                where_conditions.append("(address ILIKE %s OR notes ILIKE %s OR provider ILIKE %s)")
-                params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+                search_conditions = ["address ILIKE %s"]
+                search_params = [f"%{search}%"]
+                
+                if 'notes' in existing_columns:
+                    search_conditions.append("notes ILIKE %s")
+                    search_params.append(f"%{search}%")
+                
+                if 'provider' in existing_columns:
+                    search_conditions.append("provider ILIKE %s")
+                    search_params.append(f"%{search}%")
+                
+                where_conditions.append(f"({' OR '.join(search_conditions)})")
+                params.extend(search_params)
             
             where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
             
@@ -1914,47 +1933,78 @@ async def get_all_proxies(
             
             # Get paginated results from the proxies table
             offset = (page - 1) * limit
-            query = f"""
-                SELECT 
-                    id, address, port, type, username, password, status, error_count,
+            
+            # Build dynamic SELECT query based on available columns
+            base_select = "id, address, port, type, username, password, status, error_count"
+            
+            # Add optional columns if they exist
+            if 'provider' in existing_columns:
+                base_select += """,
                     CASE 
                         WHEN provider IS NOT NULL THEN provider
                         ELSE 'Unknown'
-                    END as provider,
+                    END as provider"""
+            else:
+                base_select += ", 'Unknown' as provider"
+            
+            if 'country' in existing_columns:
+                base_select += """,
                     CASE 
                         WHEN country IS NOT NULL THEN country
                         ELSE 'XX'
-                    END as country,
-                    CASE
-                        WHEN last_used IS NOT NULL THEN last_used
-                        ELSE NULL
-                    END as last_used,
-                    CASE
-                        WHEN last_tested IS NOT NULL THEN last_tested
-                        ELSE NULL
-                    END as last_tested,
-                    CASE
-                        WHEN created_at IS NOT NULL THEN created_at
-                        ELSE NULL
-                    END as created_at,
-                    CASE
-                        WHEN updated_at IS NOT NULL THEN updated_at
-                        ELSE NULL
-                    END as updated_at,
+                    END as country"""
+            else:
+                base_select += ", 'XX' as country"
+            
+            if 'last_used' in existing_columns:
+                base_select += ", last_used"
+            else:
+                base_select += ", NULL as last_used"
+            
+            if 'last_tested' in existing_columns:
+                base_select += ", last_tested"
+            else:
+                base_select += ", NULL as last_tested"
+            
+            if 'created_at' in existing_columns:
+                base_select += ", created_at"
+            else:
+                base_select += ", NULL as created_at"
+            
+            if 'updated_at' in existing_columns:
+                base_select += ", updated_at"
+            else:
+                base_select += ", NULL as updated_at"
+            
+            if 'notes' in existing_columns:
+                base_select += """,
                     CASE
                         WHEN notes IS NOT NULL THEN notes
                         ELSE ''
-                    END as notes,
+                    END as notes"""
+            else:
+                base_select += ", '' as notes"
+            
+            if 'tags' in existing_columns:
+                base_select += """,
                     CASE
                         WHEN tags IS NOT NULL THEN tags
                         ELSE '[]'
-                    END as tags,
-                    -- Calculate health status based on error_count
-                    CASE 
-                        WHEN status = 'active' AND error_count < 3 THEN 'good'
-                        WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 'warning'
-                        ELSE 'poor'
-                    END as health_status
+                    END as tags"""
+            else:
+                base_select += ", '[]' as tags"
+            
+            # Add health status calculation
+            base_select += """,
+                -- Calculate health status based on error_count
+                CASE 
+                    WHEN status = 'active' AND error_count < 3 THEN 'good'
+                    WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 'warning'
+                    ELSE 'poor'
+                END as health_status"""
+            
+            query = f"""
+                SELECT {base_select}
                 FROM proxies 
                 {where_clause}
                 ORDER BY 
@@ -2084,27 +2134,31 @@ async def get_proxy_summary():
             
             summary = dict(cursor.fetchone())
             
-            # Get country distribution
-            cursor.execute("""
-                SELECT country, COUNT(*) as count 
-                FROM proxies 
-                WHERE country IS NOT NULL AND country != 'XX'
-                GROUP BY country 
-                ORDER BY count DESC 
-                LIMIT 10
-            """)
-            country_distribution = [dict(row) for row in cursor.fetchall()]
+            # Get country distribution (only if column exists)
+            country_distribution = []
+            if 'country' in existing_columns:
+                cursor.execute("""
+                    SELECT country, COUNT(*) as count 
+                    FROM proxies 
+                    WHERE country IS NOT NULL AND country != 'XX'
+                    GROUP BY country 
+                    ORDER BY count DESC 
+                    LIMIT 10
+                """)
+                country_distribution = [dict(row) for row in cursor.fetchall()]
             
-            # Get provider distribution
-            cursor.execute("""
-                SELECT provider, COUNT(*) as count 
-                FROM proxies 
-                WHERE provider IS NOT NULL 
-                GROUP BY provider 
-                ORDER BY count DESC 
-                LIMIT 10
-            """)
-            provider_distribution = [dict(row) for row in cursor.fetchall()]
+            # Get provider distribution (only if column exists)
+            provider_distribution = []
+            if 'provider' in existing_columns:
+                cursor.execute("""
+                    SELECT provider, COUNT(*) as count 
+                    FROM proxies 
+                    WHERE provider IS NOT NULL 
+                    GROUP BY provider 
+                    ORDER BY count DESC 
+                    LIMIT 10
+                """)
+                provider_distribution = [dict(row) for row in cursor.fetchall()]
             
             # Get proxy type distribution
             cursor.execute("""
