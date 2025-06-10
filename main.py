@@ -353,8 +353,14 @@ async def get_config_status():
     db_message = "Database not configured"
     proxy_count = 0
     
-    if config_store["database"]:
+    # Check both config_store and config_instance for database configuration
+    db_config = config_store.get("database") or config_instance.get_database_config()
+    if db_config:
         try:
+            # Ensure config_store is synchronized with config_instance
+            if not config_store.get("database") and config_instance.get_database_config():
+                config_store["database"] = config_instance.get_database_config()
+            
             db_test_result, db_test_message = db_manager.test_connection()
             if db_test_result:
                 db_status = "connected"
@@ -564,7 +570,12 @@ async def test_database_config(
 async def get_database_config():
     """Get current database configuration"""
     try:
+        # Check both config_instance and config_store for database configuration
         db_config = config_instance.get_database_config()
+        if not db_config:
+            # Check if it's in config_store but not persisted yet
+            db_config = config_store.get("database")
+        
         if not db_config:
             return {"configured": False, "message": "Database not configured"}
         
@@ -577,6 +588,8 @@ async def get_database_config():
             "username": db_config.get("username"),
             "table": db_config.get("table", "proxies")
         }
+        
+        logger.info(f"Returning database config: {safe_config}")
         return safe_config
         
     except Exception as e:
@@ -631,6 +644,9 @@ async def save_database_config(request: DatabaseConfigRequest):
         
         # Force reload the configuration from the saved file
         config_instance._load_config()
+        
+        # Synchronize config_store with the saved configuration
+        config_store["database"] = config_instance.get_database_config()
         
         logger.info(f"Database configuration saved successfully: {request.host}:{request.port}/{request.database} (user: {request.username})")
         
@@ -1892,23 +1908,63 @@ async def get_all_proxies(
             where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
             
             # Get total count for pagination
-            count_query = f"SELECT COUNT(*) as total FROM proxy_stats{where_clause}"
+            count_query = f"SELECT COUNT(*) as total FROM proxies{where_clause}"
             cursor.execute(count_query, params)
             total_count = cursor.fetchone()['total']
             
-            # Get paginated results using the proxy_stats view
+            # Get paginated results from the proxies table
             offset = (page - 1) * limit
             query = f"""
-                SELECT * FROM proxy_stats 
+                SELECT 
+                    id, address, port, type, username, password, status, error_count,
+                    CASE 
+                        WHEN provider IS NOT NULL THEN provider
+                        ELSE 'Unknown'
+                    END as provider,
+                    CASE 
+                        WHEN country IS NOT NULL THEN country
+                        ELSE 'XX'
+                    END as country,
+                    CASE
+                        WHEN last_used IS NOT NULL THEN last_used
+                        ELSE NULL
+                    END as last_used,
+                    CASE
+                        WHEN last_tested IS NOT NULL THEN last_tested
+                        ELSE NULL
+                    END as last_tested,
+                    CASE
+                        WHEN created_at IS NOT NULL THEN created_at
+                        ELSE NULL
+                    END as created_at,
+                    CASE
+                        WHEN updated_at IS NOT NULL THEN updated_at
+                        ELSE NULL
+                    END as updated_at,
+                    CASE
+                        WHEN notes IS NOT NULL THEN notes
+                        ELSE ''
+                    END as notes,
+                    CASE
+                        WHEN tags IS NOT NULL THEN tags
+                        ELSE '[]'
+                    END as tags,
+                    -- Calculate health status based on error_count
+                    CASE 
+                        WHEN status = 'active' AND error_count < 3 THEN 'good'
+                        WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 'warning'
+                        ELSE 'poor'
+                    END as health_status
+                FROM proxies 
                 {where_clause}
                 ORDER BY 
                     CASE 
-                        WHEN health_status = 'good' THEN 1
-                        WHEN health_status = 'warning' THEN 2
+                        WHEN status = 'active' AND error_count < 3 THEN 1
+                        WHEN status = 'active' AND error_count >= 3 THEN 2
                         ELSE 3
                     END,
-                    success_rate_percent DESC NULLS LAST,
-                    last_used DESC NULLS LAST
+                    error_count ASC,
+                    id ASC
                 LIMIT %s OFFSET %s
             """
             params.extend([limit, offset])
@@ -1967,7 +2023,16 @@ async def get_proxy_summary():
             cursor = conn.cursor()
             
             # Get comprehensive summary statistics
+            # Check which columns exist in the table first
             cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'proxies'
+            """)
+            existing_columns = [row['column_name'] for row in cursor.fetchall()]
+            
+            # Build the query based on available columns
+            base_query = """
                 SELECT 
                     COUNT(*) as total_proxies,
                     COUNT(CASE WHEN status = 'active' THEN 1 END) as active_proxies,
@@ -1978,20 +2043,44 @@ async def get_proxy_summary():
                     -- Health status distribution
                     COUNT(CASE WHEN status = 'active' AND error_count < 3 THEN 1 END) as healthy_proxies,
                     COUNT(CASE WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 1 END) as warning_proxies,
-                    COUNT(CASE WHEN error_count >= 5 OR status = 'failed' THEN 1 END) as error_proxies,
-                    
+                    COUNT(CASE WHEN error_count >= 5 OR status = 'failed' THEN 1 END) as error_proxies
+            """
+            
+            # Add performance statistics if columns exist
+            if 'response_time_ms' in existing_columns:
+                base_query += """,
                     -- Performance statistics
                     AVG(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as avg_response_time,
                     MIN(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as min_response_time,
-                    MAX(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as max_response_time,
-                    
+                    MAX(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as max_response_time
+                """
+            else:
+                base_query += """,
+                    -- Performance statistics (columns don't exist)
+                    NULL as avg_response_time,
+                    NULL as min_response_time,
+                    NULL as max_response_time
+                """
+            
+            # Add usage statistics if columns exist
+            if 'last_used' in existing_columns:
+                base_query += """,
                     -- Usage statistics
                     COUNT(CASE WHEN last_used >= NOW() - INTERVAL '1 hour' THEN 1 END) as used_last_hour,
                     COUNT(CASE WHEN last_used >= NOW() - INTERVAL '24 hours' THEN 1 END) as used_last_24h,
                     COUNT(CASE WHEN last_used >= NOW() - INTERVAL '7 days' THEN 1 END) as used_last_week
-                    
-                FROM proxies
-            """)
+                """
+            else:
+                base_query += """,
+                    -- Usage statistics (columns don't exist)
+                    0 as used_last_hour,
+                    0 as used_last_24h,
+                    0 as used_last_week
+                """
+            
+            base_query += " FROM proxies"
+            
+            cursor.execute(base_query)
             
             summary = dict(cursor.fetchone())
             
@@ -2199,8 +2288,9 @@ async def auto_detect_configuration():
             "auto_db_setup": os.getenv("AUTO_DB_SETUP", "false").lower() == "true"
         }
         
-        # Check if database is auto-configured from environment
-        if all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
+        # Check if database is auto-configured from environment (only if deployment mode is compose)
+        deployment_mode = os.getenv("DEPLOYMENT_MODE", "standalone")
+        if deployment_mode == "compose" and all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
             config["database_auto_configured"] = True
             config["db_host"] = os.getenv("DB_HOST")
             config["db_name"] = os.getenv("DB_NAME")
