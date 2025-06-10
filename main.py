@@ -666,6 +666,47 @@ async def delete_database_config():
     logger.info("Database configuration deleted")
     return {"message": "Database configuration deleted", "status": "not_configured"}
 
+@app.get("/api/database/simple-status")
+async def get_simple_database_status():
+    """Simple database status check - just returns if database is working or not"""
+    try:
+        # Check if database is configured
+        db_config = config_instance.get_database_config()
+        if not db_config:
+            return {
+                "status": "not_configured",
+                "message": "Database not configured",
+                "working": False
+            }
+        
+        # Test the connection
+        db_test_result, db_test_message = db_manager.test_connection()
+        
+        if db_test_result:
+            # Test proxy table
+            proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
+            
+            return {
+                "status": "ready",
+                "message": f"Database working - {proxy_count} proxies available",
+                "working": True,
+                "proxy_count": proxy_count
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Database connection failed: {db_test_message}",
+                "working": False
+            }
+            
+    except Exception as e:
+        logger.error(f"Simple database status check failed: {str(e)}")
+        return {
+            "status": "error", 
+            "message": f"Database status check failed: {str(e)}",
+            "working": False
+        }
+
 @app.post("/api/config/proxy/toggle")
 async def toggle_proxy_usage(
     enabled: bool = Form(...)
