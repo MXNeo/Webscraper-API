@@ -70,9 +70,9 @@ async function loadSystemStatus() {
             await loadCurrentDatabaseConfig();
         }
         
-        // Update all status indicators - use auto-detect data for database status
+        // Update all status indicators - merge auto-detect and status data for database
         updateApiStatus(statusData.scrapegraph);
-        updateDatabaseStatus(autoDetectData);
+        updateDatabaseStatus(autoDetectData, statusData.database);
         updateProxyStatus(statusData.proxy);
         
     } catch (error) {
@@ -516,7 +516,7 @@ function updateApiStatus(apiConfig) {
 }
 
 // Update database status with auto-detection support
-function updateDatabaseStatus(autoDetectData) {
+function updateDatabaseStatus(autoDetectData, manualDbConfig) {
     const statusElement = document.getElementById('database-status');
     const statusBadge = document.getElementById('db-connection-status');
     const initializeBtn = document.getElementById('initialize-db-btn');
@@ -527,6 +527,7 @@ function updateDatabaseStatus(autoDetectData) {
     let text = 'Not Connected';
     let details = '';
     
+    // Check auto-configured first (Docker Compose mode)
     if (autoDetectData.database_auto_configured) {
         if (autoDetectData.database_connected) {
             if (autoDetectData.table_exists) {
@@ -563,8 +564,39 @@ function updateDatabaseStatus(autoDetectData) {
                 initializeBtn.disabled = true;
             }
         }
-    } else {
-        // Manual configuration needed
+    } 
+    // Check manually configured database (Kubernetes/standalone mode)
+    else if (manualDbConfig && manualDbConfig.configured && manualDbConfig.status === 'ready') {
+        badgeClass = 'badge bg-success';
+        text = 'Ready';
+        details = `Connected to database - ${manualDbConfig.available_proxies} proxies available`;
+        
+        // Enable reinitialize button for manual config too
+        if (initializeBtn) {
+            initializeBtn.disabled = false;
+            initializeBtn.textContent = 'Reinitialize Database';
+            initializeBtn.className = 'btn btn-warning';
+            initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
+        }
+    }
+    // Check if database is configured but might have issues
+    else if (manualDbConfig && manualDbConfig.configured) {
+        if (manualDbConfig.status === 'error') {
+            badgeClass = 'badge bg-danger';
+            text = 'Connection Error';
+            details = manualDbConfig.message || 'Database connection failed';
+        } else {
+            badgeClass = 'badge bg-warning'; 
+            text = 'Configured';
+            details = manualDbConfig.message || 'Database configured but status unknown';
+        }
+        
+        if (initializeBtn) {
+            initializeBtn.disabled = true;
+        }
+    }
+    // No configuration at all
+    else {
         badgeClass = 'badge bg-warning';
         text = 'Not Configured';
         details = 'Manual database configuration required';
