@@ -505,24 +505,25 @@ async def test_database_config(
             logger.error(f"Invalid port number: {port}")
             raise HTTPException(status_code=400, detail="Port must be a valid number between 1 and 65535")
         
-        # Create temporary configuration for testing
-        temp_config = {
-            "host": host.strip(),
-            "port": port,
-            "database": database.strip(),
-            "username": username.strip(),
-            "password": password.strip()
-        }
-        
         logger.info("Testing database connection with provided credentials...")
         
-        # Temporarily store config for testing
-        original_config = config_store.get("database")
-        config_store["database"] = temp_config
+        # Create a temporary DatabaseManager with the test configuration
+        temp_config_store = {
+            "database": {
+                "host": host.strip(),
+                "port": port,
+                "database": database.strip(),
+                "username": username.strip(),
+                "password": password.strip()
+            }
+        }
+        
+        # Create temporary database manager for testing
+        temp_db_manager = DatabaseManager(temp_config_store)
         
         try:
             # Test the connection
-            db_test_result, db_test_message = db_manager.test_connection()
+            db_test_result, db_test_message = temp_db_manager.test_connection()
             
             if not db_test_result:
                 logger.error(f"Database connection test failed: {db_test_message}")
@@ -536,7 +537,7 @@ async def test_database_config(
             logger.info("Database connection successful, testing proxy table...")
             
             # Test proxy table
-            proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
+            proxy_test_result, proxy_test_message, proxy_count = temp_db_manager.test_proxy_table()
             
             logger.info(f"Database test completed: {host}:{port}/{database}")
             logger.info(f"Proxy table test: {proxy_test_message}")
@@ -550,8 +551,8 @@ async def test_database_config(
             }
             
         finally:
-            # Restore original configuration
-            config_store["database"] = original_config
+            # Close the temporary database manager
+            temp_db_manager.disconnect()
         
     except HTTPException:
         raise
