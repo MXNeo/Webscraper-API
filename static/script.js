@@ -65,9 +65,14 @@ async function loadSystemStatus() {
         
         console.log('Configuration status:', statusData);
         
-        // Update all status indicators - use auto-detect data for database status
+        // Load current database configuration into form fields (if exists and not auto-configured)
+        if (!autoDetectData.database_auto_configured && statusData.database && statusData.database.configured) {
+            await loadCurrentDatabaseConfig();
+        }
+        
+        // Update all status indicators using the same approach as ScrapeGraph
         updateApiStatus(statusData.scrapegraph);
-        updateDatabaseStatus(autoDetectData);
+        updateDatabaseStatus(statusData.database);
         updateProxyStatus(statusData.proxy);
         
     } catch (error) {
@@ -99,6 +104,41 @@ function fillDatabaseFields(config) {
         passwordField.placeholder = 'Auto-configured from environment';
         passwordField.value = 'auto_configured_placeholder'; // Hidden placeholder value
         passwordField.disabled = false; // Keep it editable
+    }
+}
+
+// Load current database configuration from backend
+async function loadCurrentDatabaseConfig() {
+    try {
+        const response = await fetch('/api/config/database');
+        if (response.ok) {
+            const config = await response.json();
+            console.log('Loading current database config:', config);
+            
+            if (config.configured) {
+                // Fill form fields with current saved configuration
+                const hostField = document.getElementById('db-host');
+                const portField = document.getElementById('db-port');
+                const nameField = document.getElementById('db-name');
+                const userField = document.getElementById('db-user');
+                const passwordField = document.getElementById('db-password');
+                const tableField = document.getElementById('db-table');
+                
+                if (hostField && config.host) hostField.value = config.host;
+                if (portField && config.port) portField.value = config.port;
+                if (nameField && config.database) nameField.value = config.database;
+                if (userField && config.username) userField.value = config.username;
+                if (passwordField) {
+                    passwordField.placeholder = 'Current password (hidden)';
+                    passwordField.value = ''; // Leave empty but indicate password exists
+                }
+                if (tableField && config.table) tableField.value = config.table;
+                
+                console.log('Database form fields populated with saved configuration');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading current database config:', error);
     }
 }
 
@@ -200,6 +240,12 @@ async function saveDatabaseConfig(event) {
         table: document.getElementById('db-table').value
     };
     
+    // Validate required fields
+    if (!config.host || !config.database || !config.username) {
+        showAlert('Please fill in all required fields (Host, Database, Username)', 'danger');
+        return;
+    }
+    
     // Handle auto-configured password
     if (config.password === 'auto_configured_placeholder') {
         // For auto-configured setups, get the password from environment
@@ -239,8 +285,6 @@ async function saveDatabaseConfig(event) {
         
         if (response.ok) {
             showAlert('Database configuration saved and tested successfully!', 'success');
-            // Update the config store to reflect the new database connection
-            await updateConfigStore();
             // Refresh status to show updated connection state
             await loadSystemStatus();
         } else {
@@ -251,16 +295,7 @@ async function saveDatabaseConfig(event) {
     }
 }
 
-// Helper function to update config store
-async function updateConfigStore() {
-    try {
-        const response = await fetch('/api/config/status');
-        const statusData = await response.json();
-        // This will trigger the backend to refresh its internal status
-    } catch (error) {
-        console.error('Error updating config store:', error);
-    }
-}
+
 
 // Test database connection
 async function testDatabaseConnection() {
@@ -307,11 +342,8 @@ async function testDatabaseConnection() {
         if (response.ok) {
             showAlert('Database connection successful!', 'success');
             
-            // Enable initialize button for successful manual connections
-            const initializeBtn = document.getElementById('initialize-db-btn');
-            initializeBtn.disabled = false;
-            
-            loadSystemStatus(); // Refresh status
+            // Refresh status to show updated connection state
+            await loadSystemStatus();
         } else {
             showAlert(`Database connection failed: ${result.error}`, 'danger');
         }
@@ -469,85 +501,36 @@ function updateApiStatus(apiConfig) {
     }
 }
 
-// Update database status with auto-detection support
-function updateDatabaseStatus(autoDetectData) {
+// Database status update function (same pattern as ScrapeGraph API)
+function updateDatabaseStatus(dbConfig) {
     const statusElement = document.getElementById('database-status');
-    const statusBadge = document.getElementById('db-connection-status');
-    const initializeBtn = document.getElementById('initialize-db-btn');
-    const statusDetails = document.getElementById('db-status-details');
-    const statusJson = document.getElementById('db-status-json');
+    const detailsElement = document.getElementById('database-details');
     
-    let badgeClass = 'badge bg-warning';
-    let text = 'Not Connected';
-    let details = '';
-    
-    if (autoDetectData.database_auto_configured) {
-        if (autoDetectData.database_connected) {
-            if (autoDetectData.table_exists) {
-                badgeClass = 'badge bg-success';
-                text = 'Ready (Auto-configured)';
-                details = `Connected to ${autoDetectData.db_host}:${autoDetectData.db_port}/${autoDetectData.db_name} - Table exists with complete schema`;
-                
-                // Enable reinitialize button
-                if (initializeBtn) {
-                    initializeBtn.disabled = false;
-                    initializeBtn.textContent = 'Reinitialize Database';
-                    initializeBtn.className = 'btn btn-warning';
-                    initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Reinitialize Database';
-                }
-            } else {
-                badgeClass = 'badge bg-warning';
-                text = 'Connected (Auto-configured)';
-                details = `Connected to ${autoDetectData.db_host}:${autoDetectData.db_port}/${autoDetectData.db_name} - Table missing`;
-                
-                // Enable initialize button
-                if (initializeBtn) {
-                    initializeBtn.disabled = false;
-                    initializeBtn.textContent = 'Initialize Database';
-                    initializeBtn.className = 'btn btn-success';
-                    initializeBtn.innerHTML = '<i class="fas fa-table me-2"></i>Initialize Database';
-                }
-            }
-        } else {
-            badgeClass = 'badge bg-danger';
-            text = 'Connection Failed';
-            details = autoDetectData.connection_message || 'Database connection failed';
-            
-            if (initializeBtn) {
-                initializeBtn.disabled = true;
-            }
-        }
-    } else {
-        // Manual configuration needed
-        badgeClass = 'badge bg-warning';
-        text = 'Not Configured';
-        details = 'Manual database configuration required';
-        
-        if (initializeBtn) {
-            initializeBtn.disabled = true;
-        }
-    }
-    
-    // Update status elements
     if (statusElement) {
+        let badgeClass = 'badge bg-warning';
+        let text = 'Not Configured';
+        
+        switch(dbConfig.status) {
+            case 'configured':
+                badgeClass = 'badge bg-success';
+                text = 'Ready';
+                break;
+            case 'error':
+                badgeClass = 'badge bg-danger';
+                text = 'Error';
+                break;
+        }
+        
         statusElement.className = badgeClass;
         statusElement.textContent = text;
     }
     
-    if (statusBadge) {
-        statusBadge.className = badgeClass;
-        statusBadge.textContent = text;
-    }
-    
-    if (statusDetails) {
-        statusDetails.textContent = details;
-        statusDetails.style.display = details ? 'block' : 'none';
-    }
-    
-    if (statusJson) {
-        statusJson.textContent = JSON.stringify(autoDetectData, null, 2);
-        if (statusJson.parentElement) {
-            statusJson.parentElement.style.display = 'block';
+    if (detailsElement) {
+        if (dbConfig.message) {
+            detailsElement.textContent = dbConfig.message;
+            detailsElement.style.display = 'block';
+        } else {
+            detailsElement.style.display = 'none';
         }
     }
 }
@@ -864,6 +847,8 @@ async function scrapeWithMethod(method) {
             endpoint = '/api/scrape/scrapegraph';
         } else if (method === 'newsplease') {
             endpoint = '/api/scrape/newsplease';
+        } else if (method === 'zyte') {
+            endpoint = '/api/scrape/zyte';
         } else {
             endpoint = '/api/scrape/newspaper';
         }

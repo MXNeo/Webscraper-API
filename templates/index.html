@@ -139,6 +139,9 @@
                                     <button type="button" class="btn btn-info" onclick="scrapeWithMethod('newsplease')">
                                         <i class="fas fa-rss me-1"></i>Test News-Please
                                     </button>
+                                    <button type="button" class="btn btn-warning" onclick="scrapeWithMethod('zyte')">
+                                        <i class="fas fa-cloud me-1"></i>Test Zyte API
+                                    </button>
                                 </div>
                             </div>
                         </form>
@@ -240,7 +243,7 @@
                                 <div class="col-md-6">
                                     <div class="mb-3">
                                         <label for="db-host" class="form-label">Database Host</label>
-                                        <input type="text" class="form-control" id="db-host" placeholder="localhost">
+                                        <input type="text" class="form-control" id="db-host" placeholder="postgres-svc.data-services-ns.svc.cluster.local">
                                     </div>
                                 </div>
                                 <div class="col-md-3">
@@ -252,7 +255,7 @@
                                 <div class="col-md-3">
                                     <div class="mb-3">
                                         <label for="db-name" class="form-label">Database Name</label>
-                                        <input type="text" class="form-control" id="db-name" placeholder="webscraper">
+                                        <input type="text" class="form-control" id="db-name" placeholder="postgres">
                                     </div>
                                 </div>
                             </div>
