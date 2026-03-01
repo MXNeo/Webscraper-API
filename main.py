@@ -9,7 +9,11 @@ import os
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
-from scrapegraphai.graphs import SmartScraperGraph
+try:
+    from scrapegraphai.graphs import SmartScraperGraph
+    SCRAPEGRAPH_AVAILABLE = True
+except ImportError:
+    SCRAPEGRAPH_AVAILABLE = False
 from newspaper import Article
 from newsplease import NewsPlease
 import asyncio
@@ -25,6 +29,8 @@ from proxy_pool import ProxyPool, EnhancedProxyRetryManager, ProxyInfo
 import uuid
 from metrics import init_metrics, record_request_metric
 from config import Config
+from table_extraction import complete_enhanced_extraction
+import gzip
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -32,6 +38,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Warn if ScrapeGraphAI is not available
+if not SCRAPEGRAPH_AVAILABLE:
+    logger.warning("ScrapeGraphAI not available - only Newspaper4k and Playwright scraping will work")
 
 # Load environment variables
 load_dotenv()
@@ -75,6 +85,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     logger.warning("OPENAI_API_KEY not found in environment variables")
 
+# Get Zyte API key from environment variables
+ZYTE_API_KEY = os.getenv("ZYTE_API_KEY")
+if ZYTE_API_KEY:
+    logger.info("ZYTE_API_KEY loaded from environment variables")
+else:
+    logger.info("ZYTE_API_KEY not set - Zyte scraping will require API key in request or web UI config")
+
 # Initialize Config instance
 config_instance = Config()
 
@@ -93,6 +110,8 @@ config_store = {
     "min_proxy_pool_size": 10,       # Minimum pool size before refresh
     "proxy_refresh_interval": 300,   # Refresh pool every 5 minutes
     "batch_update_interval": 60,     # Process batch updates every minute
+    # Zyte API settings
+    "zyte": {"api_key": ZYTE_API_KEY} if ZYTE_API_KEY else None,
     # Metrics settings
     "metrics_enabled": True,         # Enable metrics collection
     "persist_metrics": True,         # Persist metrics to SQLite
@@ -273,7 +292,6 @@ async def health_check():
         "platform": platform.system(),
         "python_version": platform.python_version(),
         "timestamp": int(time.time()),
-        "circuit_breaker_state": db_manager.circuit_breaker.state,
         "proxy_pool_size": proxy_pool.available_proxies.qsize()
     }
 
@@ -354,13 +372,16 @@ async def get_config_status():
     db_message = "Database not configured"
     proxy_count = 0
     
-    if config_store["database"]:
+    # Check both config_store and config_instance for database configuration
+    db_config = config_store.get("database") or config_instance.get_database_config()
+    if db_config:
         try:
+            # Ensure config_store is synchronized with config_instance
+            if not config_store.get("database") and config_instance.get_database_config():
+                config_store["database"] = config_instance.get_database_config()
+            
             db_test_result, db_test_message = db_manager.test_connection()
             if db_test_result:
-                db_status = "connected"
-                db_message = db_test_message
-                
                 # Test proxy table if database is connected
                 proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
                 config_store["last_proxy_test"] = {
@@ -369,6 +390,10 @@ async def get_config_status():
                     "proxy_count": proxy_count,
                     "timestamp": time.time()
                 }
+                
+                # Use "configured" status like ScrapeGraph for consistency
+                db_status = "configured"
+                db_message = f"Database ready - {proxy_count} proxies available"
             else:
                 db_status = "error"
                 db_message = db_test_message
@@ -506,24 +531,25 @@ async def test_database_config(
             logger.error(f"Invalid port number: {port}")
             raise HTTPException(status_code=400, detail="Port must be a valid number between 1 and 65535")
         
-        # Create temporary configuration for testing
-        temp_config = {
-            "host": host.strip(),
-            "port": port,
-            "database": database.strip(),
-            "username": username.strip(),
-            "password": password.strip()
-        }
-        
         logger.info("Testing database connection with provided credentials...")
         
-        # Temporarily store config for testing
-        original_config = config_store.get("database")
-        config_store["database"] = temp_config
+        # Create a temporary DatabaseManager with the test configuration
+        temp_config_store = {
+            "database": {
+                "host": host.strip(),
+                "port": port,
+                "database": database.strip(),
+                "username": username.strip(),
+                "password": password.strip()
+            }
+        }
+        
+        # Create temporary database manager for testing
+        temp_db_manager = DatabaseManager(temp_config_store)
         
         try:
             # Test the connection
-            db_test_result, db_test_message = db_manager.test_connection()
+            db_test_result, db_test_message = temp_db_manager.test_connection()
             
             if not db_test_result:
                 logger.error(f"Database connection test failed: {db_test_message}")
@@ -537,7 +563,7 @@ async def test_database_config(
             logger.info("Database connection successful, testing proxy table...")
             
             # Test proxy table
-            proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
+            proxy_test_result, proxy_test_message, proxy_count = temp_db_manager.test_proxy_table()
             
             logger.info(f"Database test completed: {host}:{port}/{database}")
             logger.info(f"Proxy table test: {proxy_test_message}")
@@ -551,8 +577,8 @@ async def test_database_config(
             }
             
         finally:
-            # Restore original configuration
-            config_store["database"] = original_config
+            # Close the temporary database manager
+            temp_db_manager.disconnect()
         
     except HTTPException:
         raise
@@ -560,15 +586,55 @@ async def test_database_config(
         logger.error(f"Unexpected error testing database configuration: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@app.get("/api/config/database")
+async def get_database_config():
+    """Get current database configuration"""
+    try:
+        # Check both config_instance and config_store for database configuration
+        db_config = config_instance.get_database_config()
+        if not db_config:
+            # Check if it's in config_store but not persisted yet
+            db_config = config_store.get("database")
+        
+        if not db_config:
+            return {"configured": False, "message": "Database not configured"}
+        
+        # Return config without sensitive password
+        safe_config = {
+            "configured": True,
+            "host": db_config.get("host"),
+            "port": db_config.get("port", 5432),
+            "database": db_config.get("database"),
+            "username": db_config.get("username"),
+            "table": db_config.get("table", "proxies")
+        }
+        
+        logger.info(f"Returning database config: {safe_config}")
+        return safe_config
+        
+    except Exception as e:
+        logger.error(f"Failed to get database config: {str(e)}")
+        return {"configured": False, "error": str(e)}
+
 @app.post("/api/database/config")
 async def save_database_config(request: DatabaseConfigRequest):
     """Save database configuration"""
     try:
-        # Handle auto-configured password (when empty, use environment if available)
+        # Handle password field - if empty, check for existing or environment
         password = request.password
-        if not password and os.getenv("DB_PASSWORD"):
-            password = os.getenv("DB_PASSWORD")
-            logger.info("Using auto-configured database password from environment")
+        if not password:
+            # First try environment variable (for auto-configured setups)
+            if os.getenv("DB_PASSWORD"):
+                password = os.getenv("DB_PASSWORD")
+                logger.info("Using auto-configured database password from environment")
+            else:
+                # Try to keep existing password if form submitted with empty password field
+                existing_config = config_instance.get_database_config()
+                if existing_config and existing_config.get("password"):
+                    password = existing_config["password"]
+                    logger.info("Keeping existing database password")
+                else:
+                    return {"success": False, "error": "Password is required for new database configuration"}
         
         config_instance.update_database_config(
             host=request.host,
@@ -596,7 +662,13 @@ async def save_database_config(request: DatabaseConfigRequest):
         # Reset database manager connection pool to use new config
         db_manager.disconnect()
         
-        logger.info(f"Database configuration saved and config store updated: {request.host}:{request.port}")
+        # Force reload the configuration from the saved file
+        config_instance._load_config()
+        
+        # Synchronize config_store with the saved configuration
+        config_store["database"] = config_instance.get_database_config()
+        
+        logger.info(f"Database configuration saved successfully: {request.host}:{request.port}/{request.database} (user: {request.username})")
         
         return {"success": True, "message": "Database configuration saved successfully"}
         
@@ -613,6 +685,47 @@ async def delete_database_config():
     config_store["last_proxy_test"] = None
     logger.info("Database configuration deleted")
     return {"message": "Database configuration deleted", "status": "not_configured"}
+
+@app.get("/api/database/simple-status")
+async def get_simple_database_status():
+    """Simple database status check - just returns if database is working or not"""
+    try:
+        # Check if database is configured
+        db_config = config_instance.get_database_config()
+        if not db_config:
+            return {
+                "status": "not_configured",
+                "message": "Database not configured",
+                "working": False
+            }
+        
+        # Test the connection
+        db_test_result, db_test_message = db_manager.test_connection()
+        
+        if db_test_result:
+            # Test proxy table
+            proxy_test_result, proxy_test_message, proxy_count = db_manager.test_proxy_table()
+            
+            return {
+                "status": "ready",
+                "message": f"Database working - {proxy_count} proxies available",
+                "working": True,
+                "proxy_count": proxy_count
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Database connection failed: {db_test_message}",
+                "working": False
+            }
+            
+    except Exception as e:
+        logger.error(f"Simple database status check failed: {str(e)}")
+        return {
+            "status": "error", 
+            "message": f"Database status check failed: {str(e)}",
+            "working": False
+        }
 
 @app.post("/api/config/proxy/toggle")
 async def toggle_proxy_usage(
@@ -851,6 +964,28 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
                     response.raise_for_status()
                     
                     logger.debug(f"Successfully fetched content via proxy, status: {response.status_code}")
+                    logger.debug(f"Content-Type: {response.headers.get('content-type', 'unknown')}")
+                    logger.debug(f"Content-Encoding: {response.headers.get('content-encoding', 'none')}")
+                    
+                    # Validate HTML content before parsing
+                    try:
+                        html_content = response.text
+                        if not html_content or len(html_content.strip()) == 0:
+                            raise ValueError("Empty HTML content received")
+                        
+                        # Check for binary content (main issue from debug logs)
+                        if any(ord(c) < 32 and c not in '\r\n\t' for c in html_content[:100]):
+                            logger.error(f"Received binary content instead of HTML: {repr(html_content[:100])}")
+                            raise ValueError("Invalid binary content received - check Accept-Encoding headers")
+                        
+                        # Check if content looks like HTML
+                        if not ('<html' in html_content.lower() or '<div' in html_content.lower() or '<body' in html_content.lower()):
+                            logger.warning(f"Content doesn't appear to be HTML. First 200 chars: {repr(html_content[:200])}")
+                        
+                    except UnicodeDecodeError as e:
+                        logger.error(f"Unicode decode error: {e}")
+                        # Try with different encoding
+                        html_content = response.content.decode('utf-8', errors='replace')
                     
                     # Use the fetched HTML as source for ScrapGraph AI
                     scraper = SmartScraperGraph(
@@ -862,7 +997,7 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
                         }
                         
                         Please extract the complete article text without truncating. If any field is not available, use null.""",
-                        source=response.text,  # Use fetched HTML instead of URL
+                        source=html_content,  # Use validated HTML instead of URL
                         config=llm_config
                     )
                     
@@ -957,6 +1092,57 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
             proxy_used=proxy_info
         )
 
+
+async def scrape_with_playwright(url: str, wait_time: int = 3) -> Optional[str]:
+    """
+    Fallback scraper using Playwright for JavaScript-rendered content
+    Args:
+        url: URL to scrape
+        wait_time: Seconds to wait for JavaScript to render
+    Returns:
+        HTML content or None if failed
+    """
+    try:
+        from playwright.async_api import async_playwright
+        
+        logger.info(f"[PLAYWRIGHT] Starting JavaScript rendering for {url}")
+        
+        async with async_playwright() as p:
+            # Launch browser in headless mode
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
+            
+            # Create context with realistic settings
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            
+            page = await context.new_page()
+            
+            # Navigate to URL with timeout
+            logger.info(f"[PLAYWRIGHT] Navigating to {url}")
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            
+            # Wait for content to load
+            logger.info(f"[PLAYWRIGHT] Waiting {wait_time}s for JavaScript rendering")
+            await asyncio.sleep(wait_time)
+            
+            # Get rendered HTML
+            html_content = await page.content()
+            
+            await browser.close()
+            
+            logger.info(f"[PLAYWRIGHT] Successfully rendered page, content length: {len(html_content)}")
+            return html_content
+            
+    except Exception as e:
+        logger.error(f"[PLAYWRIGHT] Failed to render {url}: {e}")
+        return None
+
+
 @app.post("/api/scrape/newspaper")
 async def scrape_with_newspaper(request: ScrapeRequest):
     """Scrape using Newspaper4k with enhanced proxy pool support and retry logic"""
@@ -1006,7 +1192,7 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                         'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate',  # Let requests handle decompression
+                        'Accept-Encoding': 'gzip, deflate, br',  # Support all compression types including Brotli
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1',
                         'Sec-Fetch-Dest': 'document',
@@ -1045,12 +1231,30 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                     logger.debug(f"Content-Type: {response.headers.get('content-type', 'unknown')}")
                     logger.debug(f"Content-Encoding: {response.headers.get('content-encoding', 'none')}")
                     
-                    # Ensure we have valid text content
+                    # Manually decompress gzip if needed (requests should handle this, but sometimes fails)
                     try:
-                        # response.text handles encoding/decoding automatically
+                        # Check if content is gzip-compressed by looking at magic bytes
+                        if len(response.content) > 2 and response.content[:2] == b'\x1f\x8b':
+                            logger.info("Detected gzip-compressed content, decompressing manually...")
+                            decompressed_content = gzip.decompress(response.content)
+                            html_content = decompressed_content.decode('utf-8', errors='replace')
+                            logger.debug(f"Decompressed size: {len(html_content)} chars")
+                        else:
+                            # response.text handles encoding/decoding automatically
+                            html_content = response.text
+                    except Exception as decompress_error:
+                        logger.warning(f"Failed to decompress gzip: {decompress_error}, falling back to response.text")
                         html_content = response.text
+                    
+                    # Ensure we have valid text content with binary content detection
+                    try:
                         if not html_content or len(html_content.strip()) == 0:
                             raise ValueError("Empty HTML content received")
+                        
+                        # Check for binary content (main issue from debug logs)
+                        if any(ord(c) < 32 and c not in '\r\n\t' for c in html_content[:100]):
+                            logger.error(f"Received binary content instead of HTML: {repr(html_content[:100])}")
+                            raise ValueError("Invalid binary content received - check Accept-Encoding headers")
                         
                         # Check if content looks like HTML
                         if not ('<html' in html_content.lower() or '<div' in html_content.lower() or '<body' in html_content.lower()):
@@ -1059,68 +1263,125 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                     except UnicodeDecodeError as e:
                         logger.error(f"Unicode decode error: {e}")
                         # Try with different encoding
-                        html_content = response.content.decode('utf-8', errors='ignore')
+                        html_content = response.content.decode('utf-8', errors='replace')
                     
-                    # Create article and set the HTML content
-                    article = Article(url)
-                    article.download(input_html=html_content)
-                    article.parse()
+                    # Use the enhanced extraction that includes IOC tables
+                    logger.info(f"Using enhanced extraction with IOC table detection for {url}")
+                    enhanced_result = complete_enhanced_extraction(url, html_content)
                     
-                    # DEBUG: Log detailed article extraction results
-                    logger.info(f"[DEBUG] Newspaper4k extraction results for {url}:")
-                    logger.info(f"[DEBUG] - Title: {repr(getattr(article, 'title', None))}")
-                    logger.info(f"[DEBUG] - Text length: {len(getattr(article, 'text', '') or '')}")
-                    article_text = getattr(article, 'text', None)
-                    logger.info(f"[DEBUG] - Text preview: {repr(article_text[:200]) if article_text else 'None'}")
-                    logger.info(f"[DEBUG] - Top image: {repr(getattr(article, 'top_image', None))}")
-                    logger.info(f"[DEBUG] - Publish date: {repr(getattr(article, 'publish_date', None))}")
-                    authors = getattr(article, 'authors', None)
-                    logger.info(f"[DEBUG] - Authors: {repr(list(authors)) if authors else 'None'}")
-                    summary = getattr(article, 'summary', None)
-                    logger.info(f"[DEBUG] - Summary length: {len(summary) if summary else 0}")
-                    
-                    # Check if extraction actually succeeded
-                    if not article_text or len(article_text.strip()) == 0:
-                        logger.warning(f"[DEBUG] Newspaper4k extracted no content for {url}")
-                        logger.warning(f"[DEBUG] HTML response length: {len(html_content)}")
-                        logger.warning(f"[DEBUG] HTML preview: {repr(html_content[:500])}")
+                    # Log extraction results
+                    if "error" in enhanced_result:
+                        logger.warning(f"Enhanced extraction failed: {enhanced_result['error']}")
+                        # Fall back to standard extraction
+                        article = Article(url)
+                        article.download(input_html=html_content)
+                        article.parse()
                         
-                        # Try alternative parsing approach
-                        try:
-                            # Try parsing again with different settings
-                            article.config.fetch_images = False
-                            article.config.memoize_articles = False
+                        article_text = getattr(article, 'text', None)
+                        article_title = getattr(article, 'title', None)
+                        article_top_image = getattr(article, 'top_image', None)
+                        article_publish_date = getattr(article, 'publish_date', None)
+                        article_authors = getattr(article, 'authors', None)
+                        article_summary = getattr(article, 'summary', None)
+                        
+                        result = {
+                            "content": article_text or "",
+                            "top_image": article_top_image if article_top_image else None,
+                            "published": article_publish_date.isoformat() if article_publish_date else None,
+                            "title": article_title if article_title else None,
+                            "authors": list(article_authors) if article_authors else [],
+                            "summary": article_summary if article_summary else None
+                        }
+                    else:
+                        # Use the enhanced result
+                        logger.info(f"Enhanced extraction successful: found {enhanced_result['tables_found']} tables and {enhanced_result['iocs_found']} IOCs")
+                        
+                        # Standardize to match expected output format
+                        result = {
+                            "content": enhanced_result["content"],
+                            "top_image": enhanced_result.get("top_image"),
+                            "published": enhanced_result.get("published"),
+                            "title": enhanced_result["title"],
+                            "authors": [],
+                            "summary": None,
+                            "tables_found": enhanced_result["tables_found"],
+                            "iocs_found": enhanced_result["iocs_found"],
+                            "structured_iocs": enhanced_result["structured_iocs"],
+                            "structured_domain_iocs": enhanced_result.get("structured_domain_iocs", [])
+                        }
+                        
+                        # Also check for JS-rendered content in enhanced path
+                        content_text = result.get('content', '')
+                        is_js_shell = (
+                            len(content_text) < 500 and
+                            len(html_content) < 3000 and
+                            ('<script' in html_content.lower() or 'bundle.js' in html_content.lower() or 
+                             'react' in html_content.lower())
+                        )
+                        
+                        if is_js_shell:
+                            logger.warning(f"Enhanced extraction: Detected JS shell (content: {len(content_text)} chars)")
+                            logger.info(f"[FALLBACK] Attempting Playwright rendering for {url}")
+                            
+                            import asyncio
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            rendered_html = loop.run_until_complete(scrape_with_playwright(url, wait_time=5))
+                            loop.close()
+                            
+                            if rendered_html and len(rendered_html) > len(html_content):
+                                logger.info(f"[FALLBACK] Playwright successful, re-extracting")
+                                enhanced_result_retry = complete_enhanced_extraction(url, rendered_html)
+                                if enhanced_result_retry.get("content") and len(enhanced_result_retry["content"]) > len(content_text):
+                                    result["content"] = enhanced_result_retry["content"]
+                                    result["title"] = enhanced_result_retry.get("title") or result["title"]
+                                    logger.info(f"[FALLBACK] Extracted {len(result['content'])} chars from rendered content")
+                    
+                    # Check if we got minimal content from a JavaScript-rendered site
+                    content_text = result.get('content', '')
+                    is_js_shell = (
+                        len(content_text) < 500 and  # Very little extracted content
+                        len(html_content) < 3000 and  # Small HTML file (likely a shell)
+                        ('react' in html_content.lower() or 'vue' in html_content.lower() or 
+                         'angular' in html_content.lower() or 'app.js' in html_content.lower() or
+                         'bundle.js' in html_content.lower())
+                    )
+                    
+                    if is_js_shell:
+                        logger.warning(f"Detected JavaScript-rendered site (content: {len(content_text)} chars, HTML: {len(html_content)} chars)")
+                        logger.info(f"[FALLBACK] Attempting Playwright rendering for {url}")
+                        
+                        # Try Playwright as fallback (run async function from sync context)
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        rendered_html = loop.run_until_complete(scrape_with_playwright(url, wait_time=5))
+                        loop.close()
+                        
+                        if rendered_html and len(rendered_html) > len(html_content):
+                            logger.info(f"[FALLBACK] Playwright successful, re-parsing with Newspaper4k")
+                            
+                            # Re-parse with Playwright-rendered content
+                            article = Article(url)
+                            article.download(input_html=rendered_html)
                             article.parse()
                             
-                            updated_text = getattr(article, 'text', None)
-                            if updated_text and len(updated_text.strip()) > 0:
-                                logger.info(f"[DEBUG] Alternative parsing successful, got {len(updated_text)} characters")
-                                article_text = updated_text  # Update for final result
+                            article_text = getattr(article, 'text', None)
+                            article_title = getattr(article, 'title', None)
+                            
+                            if article_text and len(article_text) > len(content_text):
+                                logger.info(f"[FALLBACK] Extracted {len(article_text)} chars from rendered content")
+                                result['content'] = article_text
+                                result['title'] = article_title if article_title else result.get('title')
                             else:
-                                logger.warning(f"[DEBUG] Alternative parsing also failed")
-                        except Exception as e:
-                            logger.warning(f"[DEBUG] Alternative parsing error: {str(e)}")
+                                logger.warning(f"[FALLBACK] Playwright rendering didn't improve extraction")
+                        else:
+                            logger.warning(f"[FALLBACK] Playwright rendering failed or didn't improve content")
                     
                     # Mark proxy as successful if used
                     if selected_proxy:
                         proxy_retry_manager.mark_proxy_success_for_request(request_id, selected_proxy)
                         logger.debug(f"Marked proxy {selected_proxy.id} as successful for request {request_id}")
-                    
-                    # Standardize output to match ScrapGraph AI format
-                    article_title = getattr(article, 'title', None)
-                    article_top_image = getattr(article, 'top_image', None)
-                    article_publish_date = getattr(article, 'publish_date', None)
-                    article_authors = getattr(article, 'authors', None)
-                    article_summary = getattr(article, 'summary', None)
-                    
-                    result = {
-                        "content": article_text or "",
-                        "top_image": article_top_image if article_top_image else None,
-                        "published": article_publish_date.isoformat() if article_publish_date else None,
-                        "title": article_title if article_title else None,
-                        "authors": list(article_authors) if article_authors else [],
-                        "summary": article_summary if article_summary else None
-                    }
                     
                     title_for_log = result.get('title') or 'N/A'
                     title_preview = title_for_log[:50] if title_for_log != 'N/A' else 'N/A'
@@ -1315,7 +1576,7 @@ async def scrape_with_newsplease(request: ScrapeRequest):
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                             'Accept-Language': 'en-US,en;q=0.9',
-                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Accept-Encoding': 'gzip, deflate',  # Removed 'br' to avoid Brotli compression issues
                             'Connection': 'keep-alive',
                             'Upgrade-Insecure-Requests': '1',
                             'Sec-Fetch-Dest': 'document',
@@ -1337,14 +1598,47 @@ async def scrape_with_newsplease(request: ScrapeRequest):
                         
                         content_length = len(response.content)
                         logger.debug(f"Successfully fetched content via proxy, status: {response.status_code}, size: {content_length} bytes")
+                        logger.debug(f"Content-Type: {response.headers.get('content-type', 'unknown')}")
+                        logger.debug(f"Content-Encoding: {response.headers.get('content-encoding', 'none')}")
+                        
+                        # Validate HTML content before parsing
+                        try:
+                            html_content = response.text
+                            if not html_content or len(html_content.strip()) == 0:
+                                raise ValueError("Empty HTML content received")
+                            
+                            # Check for binary content (main issue from debug logs)
+                            if any(ord(c) < 32 and c not in '\r\n\t' for c in html_content[:100]):
+                                logger.error(f"Received binary content instead of HTML: {repr(html_content[:100])}")
+                                raise ValueError("Invalid binary content received - check Accept-Encoding headers")
+                            
+                            # Check if content looks like HTML
+                            if not ('<html' in html_content.lower() or '<div' in html_content.lower() or '<body' in html_content.lower()):
+                                logger.warning(f"Content doesn't appear to be HTML. First 200 chars: {repr(html_content[:200])}")
+                            
+                        except UnicodeDecodeError as e:
+                            logger.error(f"Unicode decode error: {e}")
+                            # Try with different encoding
+                            html_content = response.content.decode('utf-8', errors='replace')
                         
                         # Parse the content with news-please from HTML
-                        article = NewsPlease.from_html(response.text, url=url)
+                        article = NewsPlease.from_html(html_content, url=url)
+                        
+                        # Try enhanced extraction with IOC table detection first
+                        logger.info(f"Using enhanced extraction with IOC table detection for {url}")
+                        enhanced_result = complete_enhanced_extraction(url, html_content)
+                        
+                        # Log if enhanced extraction failed
+                        if "error" in enhanced_result:
+                            logger.warning(f"Enhanced extraction failed for {url}: {enhanced_result['error']}")
+                        else:
+                            logger.info(f"Enhanced extraction successful: {enhanced_result.get('tables_found', 0)} tables, {enhanced_result.get('iocs_found', 0)} IOCs")
                         
                         # DEBUG: Log what we got from news-please via proxy
                         logger.info(f"[DEBUG] news-please (proxy) extraction results for {url}:")
                         logger.info(f"[DEBUG] - Article type: {type(article)}")
                         logger.info(f"[DEBUG] - Article object: {repr(article)}")
+                        logger.info(f"[DEBUG] - Enhanced result: {enhanced_result['tables_found']} tables, {enhanced_result['iocs_found']} IOCs")
                         
                     else:
                         # Direct news-please extraction without proxy
@@ -1361,6 +1655,63 @@ async def scrape_with_newsplease(request: ScrapeRequest):
                         if article is None:
                             raise Exception(f"news-please could not extract article from {url}")
                         
+                        # Check if direct news-please returned empty dict - if so, try manual fetch
+                        if isinstance(article, dict) and len(article) == 0:
+                            logger.warning("[DEBUG] Direct news-please returned empty dict - trying manual fetch as fallback")
+                            try:
+                                # Manual fetch with same headers as proxy path
+                                headers = {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                    'Accept-Language': 'en-US,en;q=0.9',
+                                    'Accept-Encoding': 'gzip, deflate',  # No 'br' to avoid Brotli issues
+                                    'Connection': 'keep-alive',
+                                    'Upgrade-Insecure-Requests': '1',
+                                    'Sec-Fetch-Dest': 'document',
+                                    'Sec-Fetch-Mode': 'navigate',
+                                    'Sec-Fetch-Site': 'none',
+                                    'Cache-Control': 'max-age=0'
+                                }
+                                
+                                session = requests.Session()
+                                session.headers.update(headers)
+                                
+                                response = session.get(
+                                    url,
+                                    timeout=request_timeout,
+                                    allow_redirects=True,
+                                    verify=True
+                                )
+                                response.raise_for_status()
+                                
+                                # Validate HTML content
+                                html_content = response.text
+                                if not html_content or len(html_content.strip()) == 0:
+                                    raise ValueError("Empty HTML content received")
+                                
+                                # Check for binary content
+                                if any(ord(c) < 32 and c not in '\r\n\t' for c in html_content[:100]):
+                                    raise ValueError("Invalid binary content received")
+                                
+                                logger.info(f"[DEBUG] Manual fetch successful, trying news-please again with clean HTML")
+                                
+                                # Try news-please with manually fetched HTML
+                                article = NewsPlease.from_html(html_content, url=url)
+                                
+                                # Also try enhanced extraction with IOC table detection
+                                logger.info(f"Using enhanced extraction with IOC table detection for {url}")
+                                enhanced_result = complete_enhanced_extraction(url, html_content)
+                                
+                                # Log if enhanced extraction failed
+                                if "error" in enhanced_result:
+                                    logger.warning(f"Enhanced extraction failed for {url}: {enhanced_result['error']}")
+                                else:
+                                    logger.info(f"Enhanced extraction successful: {enhanced_result.get('tables_found', 0)} tables, {enhanced_result.get('iocs_found', 0)} IOCs")
+                                
+                            except Exception as e:
+                                logger.error(f"[DEBUG] Manual fetch fallback failed: {e}")
+                                # Keep the empty dict, will be handled in the processing section below
+                        
                         # Only try to get maintext if it's an actual article object
                         if hasattr(article, 'maintext'):
                             content_length = len(article.maintext) if article.maintext else 0
@@ -1373,45 +1724,170 @@ async def scrape_with_newsplease(request: ScrapeRequest):
                         proxy_retry_manager.mark_proxy_success_for_request(request_id, selected_proxy)
                         logger.debug(f"Marked proxy {selected_proxy.id} as successful for request {request_id}")
                     
-                    # Check if article extraction was successful
+                    # CRITICAL FIX: Handle empty dict issue from news-please
                     if article is None:
-                        raise Exception("news-please could not extract article content")
+                        raise Exception("news-please returned None - could not extract article content")
                     
-                    # DEBUG: Log all available attributes
-                    logger.info(f"[DEBUG] Available attributes on article: {dir(article)}")
+                    # DEBUG: Log what we actually got from news-please
+                    logger.info(f"[DEBUG] Article type: {type(article)}")
+                    logger.info(f"[DEBUG] Article content: {repr(article)}")
                     
-                    # Handle different response types from news-please
-                    if hasattr(article, 'maintext'):
-                        # It's a proper Article object
-                        logger.info(f"[DEBUG] Article object - maintext length: {len(article.maintext) if article.maintext else 0}")
-                        result = {
-                            "content": article.maintext if article.maintext else "",
-                            "title": article.title if hasattr(article, 'title') and article.title else None,
-                            "published": article.date_publish.isoformat() if hasattr(article, 'date_publish') and article.date_publish else None,
-                            "authors": [article.authors] if hasattr(article, 'authors') and article.authors else [],
-                            "description": article.description if hasattr(article, 'description') and article.description else None,
-                            "language": article.language if hasattr(article, 'language') and article.language else None,
-                            "source_domain": article.source_domain if hasattr(article, 'source_domain') and article.source_domain else None,
-                            "top_image": article.image_url if hasattr(article, 'image_url') and article.image_url else None,
-                            "url": article.url if hasattr(article, 'url') and article.url else url
-                        }
-                    elif isinstance(article, dict):
-                        # It's a dictionary response
-                        logger.info(f"[DEBUG] Dictionary response keys: {list(article.keys())}")
-                        result = {
-                            "content": article.get('maintext', '') or article.get('text', '') or article.get('content', ''),
-                            "title": article.get('title'),
-                            "published": article.get('date_publish'),
-                            "authors": [article.get('authors')] if article.get('authors') else [],
-                            "description": article.get('description'),
-                            "language": article.get('language'),
-                            "source_domain": article.get('source_domain'),
-                            "top_image": article.get('image_url') or article.get('top_image'),
-                            "url": article.get('url', url)
-                        }
-                    else:
-                        logger.error(f"[DEBUG] Unexpected article type: {type(article)}")
-                        raise Exception(f"Unexpected article type: {type(article)}")
+                    # Check if we got an empty dict (main issue from logs) - only when we have html_content
+                    if isinstance(article, dict) and len(article) == 0 and 'html_content' in locals():
+                        logger.warning("[DEBUG] news-please returned empty dict - trying fallback approaches with available HTML")
+                        
+                        # Fallback 1: Try without URL parameter
+                        try:
+                            article = NewsPlease.from_html(html_content)
+                            logger.info(f"[DEBUG] Fallback 1 result: {type(article)} - {len(article) if isinstance(article, dict) else 'not dict'}")
+                        except Exception as e:
+                            logger.warning(f"[DEBUG] Fallback 1 failed: {e}")
+                        
+                        # Fallback 2: Manual extraction with BeautifulSoup
+                        if isinstance(article, dict) and len(article) == 0:
+                            logger.warning("[DEBUG] Still empty dict - trying manual BeautifulSoup extraction")
+                            try:
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                
+                                # Extract title
+                                title = None
+                                for selector in ['h1', 'title', '.entry-title', '.post-title', '.article-title']:
+                                    title_elem = soup.select_one(selector)
+                                    if title_elem:
+                                        title = title_elem.get_text().strip()
+                                        break
+                                
+                                # Extract main content
+                                content = ""
+                                content_selectors = [
+                                    '.entry-content', '.post-content', '.article-content', 
+                                    'article', 'main', '.content', '#content'
+                                ]
+                                
+                                for selector in content_selectors:
+                                    content_elem = soup.select_one(selector)
+                                    if content_elem:
+                                        paragraphs = content_elem.find_all('p')
+                                        if paragraphs:
+                                            content = ' '.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+                                            break
+                                
+                                # If no specific content area found, get all paragraphs
+                                if not content:
+                                    paragraphs = soup.find_all('p')
+                                    content = ' '.join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
+                                
+                                # Create manual article dict
+                                article = {
+                                    'maintext': content,
+                                    'title': title,
+                                    'url': url,
+                                    'date_publish': None,
+                                    'authors': None,
+                                    'description': None,
+                                    'language': None,
+                                    'source_domain': None,
+                                    'image_url': None
+                                }
+                                
+                                logger.info(f"[DEBUG] Manual extraction successful: {len(content)} characters")
+                                
+                            except Exception as e:
+                                logger.error(f"[DEBUG] Manual extraction failed: {e}")
+                                # Keep the empty dict, will be handled below
+                    
+                    # Handle different response types from news-please with safer attribute access
+                    try:
+                        # Check if we have enhanced results with IOCs first
+                        if 'enhanced_result' in locals() and "error" not in enhanced_result and "content" in enhanced_result and enhanced_result["content"]:
+                            logger.info(f"[DEBUG] Using enhanced extraction result with tables and IOCs")
+                            
+                            # Use the enhanced result with tables and IOCs
+                            result = {
+                                "content": enhanced_result["content"],
+                                "title": enhanced_result.get("title"),
+                                "published": enhanced_result.get("published"),
+                                "authors": [],  # Enhanced extraction doesn't extract authors
+                                "description": None,  # Enhanced extraction doesn't extract description
+                                "language": None,
+                                "source_domain": None,
+                                "top_image": enhanced_result.get("top_image"),
+                                "url": url,
+                                "tables_found": enhanced_result.get("tables_found", 0),
+                                "iocs_found": enhanced_result.get("iocs_found", 0),
+                                "structured_iocs": enhanced_result.get("structured_iocs", []),
+                                "structured_domain_iocs": enhanced_result.get("structured_domain_iocs", [])
+                            }
+                            
+                            # If we have any missing fields, try to get them from the news-please article
+                            if hasattr(article, 'title') and not result["title"]:
+                                result["title"] = getattr(article, 'title', None)
+                            
+                            if hasattr(article, 'date_publish') and not result["published"]:
+                                result["published"] = getattr(article, 'date_publish', None).isoformat() if getattr(article, 'date_publish', None) else None
+                            
+                            if hasattr(article, 'authors'):
+                                result["authors"] = [getattr(article, 'authors', None)] if getattr(article, 'authors', None) else []
+                            
+                            if hasattr(article, 'description'):
+                                result["description"] = getattr(article, 'description', None)
+                            
+                            if hasattr(article, 'language'):
+                                result["language"] = getattr(article, 'language', None)
+                            
+                            if hasattr(article, 'source_domain'):
+                                result["source_domain"] = getattr(article, 'source_domain', None)
+                            
+                            if hasattr(article, 'image_url') and not result["top_image"]:
+                                result["top_image"] = getattr(article, 'image_url', None)
+                                
+                        elif hasattr(article, 'maintext'):
+                            # It's a proper Article object
+                            maintext = getattr(article, 'maintext', None) or ""
+                            logger.info(f"[DEBUG] Article object - maintext length: {len(maintext)}")
+                            
+                            result = {
+                                "content": maintext,
+                                "title": getattr(article, 'title', None),
+                                "published": getattr(article, 'date_publish', None).isoformat() if getattr(article, 'date_publish', None) else None,
+                                "authors": [getattr(article, 'authors', None)] if getattr(article, 'authors', None) else [],
+                                "description": getattr(article, 'description', None),
+                                "language": getattr(article, 'language', None),
+                                "source_domain": getattr(article, 'source_domain', None),
+                                "top_image": getattr(article, 'image_url', None),
+                                "url": getattr(article, 'url', url)
+                            }
+                        elif isinstance(article, dict):
+                            # It's a dictionary response (including our manual extraction)
+                            content_text = article.get('maintext', '') or article.get('text', '') or article.get('content', '')
+                            logger.info(f"[DEBUG] Dictionary response - content length: {len(content_text)}")
+                            
+                            result = {
+                                "content": content_text,
+                                "title": article.get('title'),
+                                "published": article.get('date_publish'),
+                                "authors": [article.get('authors')] if article.get('authors') else [],
+                                "description": article.get('description'),
+                                "language": article.get('language'),
+                                "source_domain": article.get('source_domain'),
+                                "top_image": article.get('image_url') or article.get('top_image'),
+                                "url": article.get('url', url)
+                            }
+                        else:
+                            logger.error(f"[DEBUG] Unexpected article type: {type(article)}")
+                            raise Exception(f"Unexpected article type: {type(article)}")
+                        
+                        # Final validation
+                        if not result.get('content') or len(result['content'].strip()) == 0:
+                            raise Exception("No content extracted after all fallback attempts")
+                            
+                    except AttributeError as e:
+                        logger.error(f"[DEBUG] AttributeError when processing article: {e}")
+                        raise Exception(f"Failed to process news-please article: {e}")
+                    except Exception as e:
+                        logger.error(f"[DEBUG] Unexpected error processing article: {e}")
+                        raise Exception(f"Failed to extract content from news-please article: {e}")
                     
                     logger.info(f"Successfully scraped article with news-please: content_length={len(result['content'])}, title='{result.get('title', 'N/A')[:50]}...', attempt={attempt + 1}")
                     return result
@@ -1543,6 +2019,173 @@ async def scrape_with_newsplease(request: ScrapeRequest):
             proxy_used=proxy_info
         )
 
+
+@app.post("/api/scrape/zyte")
+async def scrape_with_zyte(request: ScrapeRequest):
+    """Scrape using Zyte API for article extraction.
+    
+    Zyte handles anti-bot, rendering, and proxy rotation internally.
+    Only the articleBody text is returned (no HTML).
+    """
+    start_time = time.time()
+    url = str(request.url)
+    request_id = str(uuid.uuid4())
+    error_type = None
+    content_length = 0
+    
+    try:
+        logger.info(f"Received Zyte scrape request for URL: {url} (request_id: {request_id})")
+        
+        # Resolve API key: request body > env var > web UI config
+        api_key = request.api_key or ZYTE_API_KEY
+        if not api_key:
+            zyte_cfg = config_store.get("zyte", {}) or {}
+            api_key = zyte_cfg.get("api_key")
+        
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Zyte API key is required. Provide it via request body, ZYTE_API_KEY env var, or web UI configuration."
+            )
+        
+        import httpx
+        
+        async def call_zyte_api():
+            payload = {
+                "url": url,
+                "article": True,
+                "articleOptions": {"extractFrom": "httpResponseBody"},
+                "followRedirect": True,
+            }
+            
+            timeout = httpx.Timeout(60.0, connect=15.0)
+            
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    "https://api.zyte.com/v1/extract",
+                    json=payload,
+                    auth=(api_key, ""),
+                )
+                response.raise_for_status()
+                return response.json()
+        
+        zyte_result = await call_zyte_api()
+        
+        article_data = zyte_result.get("article", {})
+        article_body = article_data.get("articleBody", "")
+        
+        if not article_body or not article_body.strip():
+            raise Exception("Zyte returned empty articleBody - the page may not contain a recognizable article")
+        
+        content_length = len(article_body)
+        
+        # Map Zyte fields to standardized response
+        authors_raw = article_data.get("authors", [])
+        authors = [a.get("name", a.get("nameRaw", "")) for a in authors_raw] if authors_raw else []
+        
+        main_image = article_data.get("mainImage", {})
+        top_image = main_image.get("url") if isinstance(main_image, dict) else None
+        
+        result = {
+            "content": article_body,
+            "title": article_data.get("headline"),
+            "published": article_data.get("datePublished"),
+            "published_raw": article_data.get("datePublishedRaw"),
+            "authors": authors,
+            "description": article_data.get("description"),
+            "language": article_data.get("inLanguage"),
+            "top_image": top_image,
+            "url": zyte_result.get("url", url),
+            "canonical_url": article_data.get("canonicalUrl"),
+        }
+        
+        duration = time.time() - start_time
+        logger.info(f"Zyte scrape successful: content_length={content_length}, title='{result.get('title', 'N/A')[:50]}...', duration={duration:.2f}s")
+        
+        record_request_metric(
+            url=url,
+            method="zyte",
+            success=True,
+            duration=duration,
+            content_length=content_length,
+            attempt_count=1,
+            request_id=request_id
+        )
+        
+        return ScrapeResponse(
+            url=url,
+            content=result,
+            status="success",
+        )
+        
+    except httpx.HTTPStatusError as e:
+        duration = time.time() - start_time
+        status_code = e.response.status_code
+        
+        if status_code == 401:
+            error_msg = "Zyte API authentication failed - check your API key"
+            error_type = "AuthError"
+        elif status_code == 403:
+            error_msg = "Zyte API access forbidden - check your plan/quota"
+            error_type = "ForbiddenError"
+        elif status_code == 429:
+            error_msg = "Zyte API rate limit exceeded - try again later"
+            error_type = "RateLimitError"
+        elif status_code == 520:
+            error_msg = f"Zyte could not extract content from this URL (status {status_code})"
+            error_type = "ExtractionError"
+        else:
+            error_msg = f"Zyte API error (HTTP {status_code}): {str(e)}"
+            error_type = "HTTPError"
+        
+        logger.error(f"Zyte scrape failed for {url}: {error_msg}")
+        
+        record_request_metric(
+            url=url,
+            method="zyte",
+            success=False,
+            duration=duration,
+            error_type=error_type,
+            content_length=0,
+            attempt_count=1,
+            request_id=request_id
+        )
+        
+        return ScrapeResponse(
+            url=url,
+            content={},
+            status="error",
+            error=error_msg,
+        )
+        
+    except HTTPException:
+        raise
+        
+    except Exception as e:
+        duration = time.time() - start_time
+        error_type = type(e).__name__
+        error_msg = f"Zyte scraping failed: {str(e)}"
+        logger.error(f"Zyte scrape failed for {url}: {error_msg}")
+        
+        record_request_metric(
+            url=url,
+            method="zyte",
+            success=False,
+            duration=duration,
+            error_type=error_type,
+            content_length=0,
+            attempt_count=1,
+            request_id=request_id
+        )
+        
+        return ScrapeResponse(
+            url=url,
+            content={},
+            status="error",
+            error=error_msg,
+        )
+
+
 # Add metrics endpoints
 @app.get("/api/metrics/current")
 async def get_current_metrics():
@@ -1594,18 +2237,10 @@ async def get_service_stats():
         # Get proxy pool stats
         pool_stats = proxy_pool.get_pool_stats()
         
-        # Get circuit breaker status
-        circuit_breaker_status = {
-            "state": db_manager.circuit_breaker.state,
-            "failure_count": db_manager.circuit_breaker.failure_count,
-            "last_failure_time": db_manager.circuit_breaker.last_failure_time
-        }
-        
         return {
             "timestamp": int(time.time()),
             "proxy_stats": proxy_stats,
             "proxy_pool_stats": pool_stats,
-            "circuit_breaker": circuit_breaker_status,
             "config": {
                 "proxy_enabled": config_store.get("proxy_enabled", False),
                 "proxy_retry_count": config_store.get("proxy_retry_count", 3),
@@ -1841,7 +2476,15 @@ async def get_all_proxies(
         with db_manager.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Build WHERE clause based on filters
+            # Check which columns exist in the table first
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'proxies'
+            """)
+            existing_columns = [row['column_name'] for row in cursor.fetchall()]
+            
+            # Build WHERE clause based on filters and available columns
             where_conditions = []
             params = []
             
@@ -1849,38 +2492,120 @@ async def get_all_proxies(
                 where_conditions.append("status = %s")
                 params.append(status)
             
-            if country:
+            if country and 'country' in existing_columns:
                 where_conditions.append("country = %s")
                 params.append(country)
             
-            if provider:
+            if provider and 'provider' in existing_columns:
                 where_conditions.append("provider ILIKE %s")
                 params.append(f"%{provider}%")
             
             if search:
-                where_conditions.append("(address ILIKE %s OR notes ILIKE %s OR provider ILIKE %s)")
-                params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+                search_conditions = ["address ILIKE %s"]
+                search_params = [f"%{search}%"]
+                
+                if 'notes' in existing_columns:
+                    search_conditions.append("notes ILIKE %s")
+                    search_params.append(f"%{search}%")
+                
+                if 'provider' in existing_columns:
+                    search_conditions.append("provider ILIKE %s")
+                    search_params.append(f"%{search}%")
+                
+                where_conditions.append(f"({' OR '.join(search_conditions)})")
+                params.extend(search_params)
             
             where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
             
             # Get total count for pagination
-            count_query = f"SELECT COUNT(*) as total FROM proxy_stats{where_clause}"
+            count_query = f"SELECT COUNT(*) as total FROM proxies{where_clause}"
             cursor.execute(count_query, params)
             total_count = cursor.fetchone()['total']
             
-            # Get paginated results using the proxy_stats view
+            # Get paginated results from the proxies table
             offset = (page - 1) * limit
+            
+            # Build dynamic SELECT query based on available columns
+            base_select = "id, address, port, type, username, password, status, error_count"
+            
+            # Add optional columns if they exist
+            if 'provider' in existing_columns:
+                base_select += """,
+                    CASE 
+                        WHEN provider IS NOT NULL THEN provider
+                        ELSE 'Unknown'
+                    END as provider"""
+            else:
+                base_select += ", 'Unknown' as provider"
+            
+            if 'country' in existing_columns:
+                base_select += """,
+                    CASE 
+                        WHEN country IS NOT NULL THEN country
+                        ELSE 'XX'
+                    END as country"""
+            else:
+                base_select += ", 'XX' as country"
+            
+            if 'last_used' in existing_columns:
+                base_select += ", last_used"
+            else:
+                base_select += ", NULL as last_used"
+            
+            if 'last_tested' in existing_columns:
+                base_select += ", last_tested"
+            else:
+                base_select += ", NULL as last_tested"
+            
+            if 'created_at' in existing_columns:
+                base_select += ", created_at"
+            else:
+                base_select += ", NULL as created_at"
+            
+            if 'updated_at' in existing_columns:
+                base_select += ", updated_at"
+            else:
+                base_select += ", NULL as updated_at"
+            
+            if 'notes' in existing_columns:
+                base_select += """,
+                    CASE
+                        WHEN notes IS NOT NULL THEN notes
+                        ELSE ''
+                    END as notes"""
+            else:
+                base_select += ", '' as notes"
+            
+            if 'tags' in existing_columns:
+                base_select += """,
+                    CASE
+                        WHEN tags IS NOT NULL THEN tags
+                        ELSE '[]'
+                    END as tags"""
+            else:
+                base_select += ", '[]' as tags"
+            
+            # Add health status calculation
+            base_select += """,
+                -- Calculate health status based on error_count
+                CASE 
+                    WHEN status = 'active' AND error_count < 3 THEN 'good'
+                    WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 'warning'
+                    ELSE 'poor'
+                END as health_status"""
+            
             query = f"""
-                SELECT * FROM proxy_stats 
+                SELECT {base_select}
+                FROM proxies 
                 {where_clause}
                 ORDER BY 
                     CASE 
-                        WHEN health_status = 'good' THEN 1
-                        WHEN health_status = 'warning' THEN 2
+                        WHEN status = 'active' AND error_count < 3 THEN 1
+                        WHEN status = 'active' AND error_count >= 3 THEN 2
                         ELSE 3
                     END,
-                    success_rate_percent DESC NULLS LAST,
-                    last_used DESC NULLS LAST
+                    error_count ASC,
+                    id ASC
                 LIMIT %s OFFSET %s
             """
             params.extend([limit, offset])
@@ -1939,7 +2664,16 @@ async def get_proxy_summary():
             cursor = conn.cursor()
             
             # Get comprehensive summary statistics
+            # Check which columns exist in the table first
             cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'proxies'
+            """)
+            existing_columns = [row['column_name'] for row in cursor.fetchall()]
+            
+            # Build the query based on available columns
+            base_query = """
                 SELECT 
                     COUNT(*) as total_proxies,
                     COUNT(CASE WHEN status = 'active' THEN 1 END) as active_proxies,
@@ -1950,44 +2684,72 @@ async def get_proxy_summary():
                     -- Health status distribution
                     COUNT(CASE WHEN status = 'active' AND error_count < 3 THEN 1 END) as healthy_proxies,
                     COUNT(CASE WHEN status = 'active' AND error_count >= 3 AND error_count < 5 THEN 1 END) as warning_proxies,
-                    COUNT(CASE WHEN error_count >= 5 OR status = 'failed' THEN 1 END) as error_proxies,
-                    
+                    COUNT(CASE WHEN error_count >= 5 OR status = 'failed' THEN 1 END) as error_proxies
+            """
+            
+            # Add performance statistics if columns exist
+            if 'response_time_ms' in existing_columns:
+                base_query += """,
                     -- Performance statistics
                     AVG(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as avg_response_time,
                     MIN(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as min_response_time,
-                    MAX(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as max_response_time,
-                    
+                    MAX(CASE WHEN response_time_ms IS NOT NULL THEN response_time_ms END) as max_response_time
+                """
+            else:
+                base_query += """,
+                    -- Performance statistics (columns don't exist)
+                    NULL as avg_response_time,
+                    NULL as min_response_time,
+                    NULL as max_response_time
+                """
+            
+            # Add usage statistics if columns exist
+            if 'last_used' in existing_columns:
+                base_query += """,
                     -- Usage statistics
                     COUNT(CASE WHEN last_used >= NOW() - INTERVAL '1 hour' THEN 1 END) as used_last_hour,
                     COUNT(CASE WHEN last_used >= NOW() - INTERVAL '24 hours' THEN 1 END) as used_last_24h,
                     COUNT(CASE WHEN last_used >= NOW() - INTERVAL '7 days' THEN 1 END) as used_last_week
-                    
-                FROM proxies
-            """)
+                """
+            else:
+                base_query += """,
+                    -- Usage statistics (columns don't exist)
+                    0 as used_last_hour,
+                    0 as used_last_24h,
+                    0 as used_last_week
+                """
+            
+            base_query += " FROM proxies"
+            
+            cursor.execute(base_query)
             
             summary = dict(cursor.fetchone())
             
-            # Get country distribution
-            cursor.execute("""
-                SELECT country, COUNT(*) as count 
-                FROM proxies 
-                WHERE country IS NOT NULL AND country != 'XX'
-                GROUP BY country 
-                ORDER BY count DESC 
-                LIMIT 10
-            """)
-            country_distribution = [dict(row) for row in cursor.fetchall()]
+            # Get country distribution (only if column exists)
+            country_distribution = []
+            if 'country' in existing_columns:
+                cursor.execute("""
+                    SELECT country, COUNT(*) as count 
+                    FROM proxies 
+                    WHERE country IS NOT NULL AND country != 'XX'
+                    GROUP BY country 
+                    ORDER BY count DESC 
+                    LIMIT 10
+                """)
+                country_distribution = [dict(row) for row in cursor.fetchall()]
             
-            # Get provider distribution
-            cursor.execute("""
-                SELECT provider, COUNT(*) as count 
-                FROM proxies 
-                WHERE provider IS NOT NULL 
-                GROUP BY provider 
-                ORDER BY count DESC 
-                LIMIT 10
-            """)
-            provider_distribution = [dict(row) for row in cursor.fetchall()]
+            # Get provider distribution (only if column exists)
+            provider_distribution = []
+            if 'provider' in existing_columns:
+                cursor.execute("""
+                    SELECT provider, COUNT(*) as count 
+                    FROM proxies 
+                    WHERE provider IS NOT NULL 
+                    GROUP BY provider 
+                    ORDER BY count DESC 
+                    LIMIT 10
+                """)
+                provider_distribution = [dict(row) for row in cursor.fetchall()]
             
             # Get proxy type distribution
             cursor.execute("""
@@ -2080,7 +2842,7 @@ class WebSocketLogHandler(logging.Handler):
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     # If we're in an async context, schedule the task
-            asyncio.create_task(self.log_manager.broadcast_log(log_entry))
+                    asyncio.create_task(self.log_manager.broadcast_log(log_entry))
                 else:
                     # If not in async context, run it directly
                     loop.run_until_complete(self.log_manager.broadcast_log(log_entry))
@@ -2155,6 +2917,7 @@ async def get_deployment_info():
         "db_init_sample_data": os.getenv("DB_INIT_SAMPLE_DATA", "false").lower() == "true",
         "metrics_enabled": config_store.get("metrics_enabled", True),
         "proxy_enabled": config_store.get("proxy_enabled", False),
+        "zyte_configured": bool(ZYTE_API_KEY or (config_store.get("zyte") or {}).get("api_key")),
         "platform": platform.system(),
         "container_id": os.getenv("HOSTNAME", "unknown"),
         "version": "1.0.0"
@@ -2171,8 +2934,9 @@ async def auto_detect_configuration():
             "auto_db_setup": os.getenv("AUTO_DB_SETUP", "false").lower() == "true"
         }
         
-        # Check if database is auto-configured from environment
-        if all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
+        # Check if database is auto-configured from environment (only if deployment mode is compose)
+        deployment_mode = os.getenv("DEPLOYMENT_MODE", "standalone")
+        if deployment_mode == "compose" and all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]):
             config["database_auto_configured"] = True
             config["db_host"] = os.getenv("DB_HOST")
             config["db_name"] = os.getenv("DB_NAME")
