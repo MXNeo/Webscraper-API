@@ -138,6 +138,14 @@ if all(os.getenv(var) for var in ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"
     if os.getenv("DB_PORT"):
         config_instance.config["database"]["port"] = int(os.getenv("DB_PORT"))
     logger.info(f"Database configuration set: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT', '5432')}")
+    # IMPORTANT: also propagate into config_store so proxy logic can find it
+    config_store["database"] = config_instance.get_database_config()
+    logger.info("Database configuration propagated to config_store from environment variables")
+
+    # Auto-enable proxy pool if PROXY_ENABLED=true is set in the environment
+    if os.getenv("PROXY_ENABLED", "").lower() in ("true", "1", "yes"):
+        config_store["proxy_enabled"] = True
+        logger.info("Proxy pool auto-enabled via PROXY_ENABLED environment variable")
 
 # Initialize enhanced proxy pool and retry manager
 proxy_pool = ProxyPool(db_manager, config_store)

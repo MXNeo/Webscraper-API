@@ -1,0 +1,9 @@
+# Optional heavy dependencies (~5-8 GB installed size)
+# Install with:  pip install -r requirements-optional.txt
+# After playwright install also run:  playwright install chromium
+
+# AI-powered scraping via ScrapGraph AI (requires OpenAI / Anthropic key)
+scrapegraphai>=1.0.0
+
+# JavaScript rendering via headless Chromium (requires playwright install chromium)
+playwright>=1.40.0
