@@ -201,3 +201,26 @@ def test_wrong_key_does_not_crash(tmp_path, monkeypatch):
     Config().update_database_config("db", "name", "proxies", "user", "pw")
     os.remove(tmp_path / "secret.key")  # key lost -> new key generated
     assert Config().get_database_config()["password"] == ""
+
+
+def test_settings_read_from_environment(tmp_path, monkeypatch):
+    from config import Config
+
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("REQUEST_TIMEOUT", "42")
+    monkeypatch.setenv("PROXY_POOL_SIZE", "7")
+    monkeypatch.setenv("METRICS_ENABLED", "false")
+    monkeypatch.setenv("DB_RETENTION_DAYS", "3")
+    cfg = Config()
+    assert cfg.REQUEST_TIMEOUT == 42
+    assert cfg.PROXY_POOL_SIZE == 7
+    assert cfg.METRICS_ENABLED is False
+    assert cfg.DB_RETENTION_DAYS == 3
+
+
+def test_main_uses_configured_settings():
+    import main
+
+    assert main.config_store["request_timeout"] == main.config_instance.REQUEST_TIMEOUT
+    assert main.config_store["metrics_db_path"] == main.config_instance.METRICS_DB_PATH
+    assert main.proxy_pool.pool_size == main.config_instance.PROXY_POOL_SIZE
