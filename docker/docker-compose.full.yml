@@ -27,8 +27,11 @@ services:
       
       # API Key (can be overridden in .env file)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CONFIG_DIR: /app/config
     volumes:
+      # Short-syntax bind mounts: Docker creates the host directories if missing
       - ../data:/app/data
+      - ../config:/app/config
     networks:
       - webscraper_full
     depends_on:
