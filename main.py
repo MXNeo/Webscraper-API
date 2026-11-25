@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, field_validator
 from typing import Dict, Any, Optional, List
 import os
 import logging
@@ -30,6 +30,7 @@ import uuid
 from metrics import init_metrics, record_request_metric
 from config import Config
 from table_extraction import complete_enhanced_extraction
+from security import AuthMiddleware, UnsafeURLError, safe_get, validate_url
 import gzip
 
 # Configure logging with more detailed format
@@ -72,13 +73,31 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Add CORS middleware
+# CORS_ORIGINS: comma-separated list of allowed origins (default "*").
+# Credentials are only allowed for an explicit origin list - combining "*" with
+# credentials would let any website issue authenticated requests to this API.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()] or ["*"]
+_cors_wildcard = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"] if _cors_wildcard else _cors_origins,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Optional authentication (enabled when AUTH_PASSWORD is set).
+# Added after CORS so it runs first (outermost) - CORS preflight (OPTIONS) is exempt.
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
+if AUTH_PASSWORD:
+    app.add_middleware(
+        AuthMiddleware,
+        username=os.getenv("AUTH_USERNAME", "admin"),
+        password=AUTH_PASSWORD,
+    )
+    logger.info("Authentication enabled (AUTH_PASSWORD is set)")
+else:
+    logger.warning("AUTH_PASSWORD not set - API and web UI are accessible without authentication")
 
 # Get OpenAI API key from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -160,6 +179,17 @@ class ScrapeRequest(BaseModel):
     api_key: Optional[str] = None
     use_proxy: Optional[bool] = False
 
+    @field_validator("url")
+    @classmethod
+    def _check_url_is_public(cls, v):
+        # SSRF protection: reject loopback/private/link-local/metadata targets
+        # (override with ALLOW_PRIVATE_URLS=true)
+        try:
+            validate_url(str(v))
+        except UnsafeURLError as e:
+            raise ValueError(str(e))
+        return v
+
 class ScrapeResponse(BaseModel):
     url: str
     content: Dict[str, Any]
@@ -193,7 +223,7 @@ def get_llm_config(api_key: str = None):
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     """Serve the main web interface"""
-    return templates.TemplateResponse("index.html", {
+    return templates.TemplateResponse(request, "index.html", {
         "request": request,
         "has_api_key": bool(OPENAI_API_KEY)
     })
@@ -201,87 +231,20 @@ async def home(request: Request):
 @app.get("/statistics", response_class=HTMLResponse)
 async def statistics_page(request: Request):
     """Serve the statistics dashboard page"""
-    return templates.TemplateResponse("statistics.html", {
+    return templates.TemplateResponse(request, "statistics.html", {
         "request": request
     })
 
 @app.get("/proxy-management", response_class=HTMLResponse)
 async def proxy_management_page(request: Request):
     """Serve the proxy management page"""
-    return templates.TemplateResponse("proxy-management.html", {
+    return templates.TemplateResponse(request, "proxy-management.html", {
         "request": request
     })
 
-@app.post("/api/scrape", response_class=HTMLResponse)
-async def web_scrape(
-    request: Request,
-    url: str = Form(...),
-    api_key: str = Form(None)
-):
-    """Web interface for scraping"""
-    try:
-        # Use the API key from form or environment
-        effective_api_key = api_key.strip() if api_key and api_key.strip() else OPENAI_API_KEY
-        
-        if not effective_api_key:
-            raise HTTPException(status_code=400, detail="API key is required")
-        
-        # Validate API key format
-        if not effective_api_key.startswith("sk-") or len(effective_api_key) < 20:
-            raise HTTPException(status_code=400, detail="Invalid API key format")
-        
-        # Get LLM configuration
-        llm_config = get_llm_config(effective_api_key)
-        
-        # Define the scraping function to run in thread pool
-        def run_scraper():
-            scraper = SmartScraperGraph(
-                prompt="""Extract the following information from this webpage and return it as a JSON object:
-                {
-                    "content": "The complete article content/text without HTML markup - include the full text without truncating",
-                    "top_image": "URL of the main article image if available",
-                    "published": "Publication date if available"
-                }
-                
-                Please extract the complete article text without truncating. If any field is not available, use null.""",
-                source=url,
-                config=llm_config
-            )
-            result = scraper.run()
-            
-            # Handle nested content structure that sometimes occurs
-            if isinstance(result, dict) and 'content' in result:
-                # If the result has nested content, flatten it
-                if isinstance(result['content'], dict) and 'content' in result['content']:
-                    return {
-                        'content': result['content']['content'],
-                        'top_image': result['content'].get('top_image'),
-                        'published': result['content'].get('published')
-                    }
-            
-            return result
-        
-        # Run the scraper in a thread pool to avoid asyncio.run() conflict
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(thread_pool, run_scraper)
-        
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "has_api_key": bool(OPENAI_API_KEY),
-            "result": result,
-            "url": url,
-            "success": True
-        })
-        
-    except Exception as e:
-        logger.error(f"Error scraping URL {url}: {str(e)}")
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "has_api_key": bool(OPENAI_API_KEY),
-            "error": str(e),
-            "url": url,
-            "success": False
-        })
+# NOTE: a second form-based POST /api/scrape handler used to live here. It shadowed the
+# JSON endpoint below (FastAPI uses the first matching route), so JSON clients always got 422.
+# The web UI does not use it, so it was removed.
 
 # API Routes
 @app.get("/api/health")
@@ -961,7 +924,7 @@ async def scrape_with_scrapegraph_config(request: ScrapeRequest):
                     }
                     
                     logger.debug(f"Fetching URL with proxy for ScrapGraph AI: {url}")
-                    response = requests.get(
+                    response = safe_get(
                         url,
                         headers=headers,
                         proxies=proxies,
@@ -1225,8 +1188,9 @@ async def scrape_with_newspaper(request: ScrapeRequest):
                     session = requests.Session()
                     session.headers.update(headers)
                     
-                    response = session.get(
+                    response = safe_get(
                         url,
+                        session=session,
                         proxies=proxies,
                         timeout=request_timeout,
                         allow_redirects=True,
@@ -1594,7 +1558,7 @@ async def scrape_with_newsplease(request: ScrapeRequest):
                         }
                         
                         logger.debug(f"Fetching URL with proxy: {url}")
-                        response = requests.get(
+                        response = safe_get(
                             url,
                             headers=headers,
                             proxies=proxy_config,
@@ -1684,8 +1648,9 @@ async def scrape_with_newsplease(request: ScrapeRequest):
                                 session = requests.Session()
                                 session.headers.update(headers)
                                 
-                                response = session.get(
+                                response = safe_get(
                                     url,
+                                    session=session,
                                     timeout=request_timeout,
                                     allow_redirects=True,
                                     verify=True
@@ -2477,6 +2442,9 @@ async def get_all_proxies(
     search: str = None
 ):
     """Get paginated list of all proxies with filtering and search"""
+    # Clamp pagination parameters (limit=0 used to cause a ZeroDivisionError)
+    page = max(1, page)
+    limit = min(max(1, limit), 500)
     try:
         if not config_instance.get_database_config():
             raise HTTPException(status_code=400, detail="Database not configured")
@@ -2625,6 +2593,10 @@ async def get_all_proxies(
             proxy_list = []
             for proxy in proxies:
                 proxy_dict = dict(proxy)
+                # Never expose proxy credentials over the API
+                proxy_dict["has_auth"] = bool(proxy_dict.get("username") and proxy_dict.get("password"))
+                if proxy_dict.get("password"):
+                    proxy_dict["password"] = "***"
                 # Format timestamps for display
                 for timestamp_field in ['last_used', 'last_tested', 'created_at', 'updated_at']:
                     if proxy_dict.get(timestamp_field):
@@ -2640,7 +2612,7 @@ async def get_all_proxies(
                 proxy_list.append(proxy_dict)
             
             cursor.close()
-            
+
             return {
                 "proxies": proxy_list,
                 "pagination": {
@@ -2656,7 +2628,9 @@ async def get_all_proxies(
                     "search": search
                 }
             }
-            
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get proxies: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2790,8 +2764,10 @@ class LogManager:
         self.connections: List[WebSocket] = []
         self.log_buffer: List[Dict] = []
         self.max_buffer_size = 1000
-    
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+
     async def connect(self, websocket: WebSocket):
+        self.loop = asyncio.get_running_loop()
         await websocket.accept()
         self.connections.append(websocket)
         
@@ -2845,15 +2821,21 @@ class WebSocketLogHandler(logging.Handler):
             if hasattr(record, 'request_id'):
                 log_entry['request_id'] = record.request_id
             
-            # Send to WebSocket clients (non-blocking)
+            # Send to WebSocket clients (non-blocking, thread-safe).
+            # Most scraping runs in a thread pool, so we must hand the coroutine to the
+            # server's event loop instead of calling get_event_loop() in the worker thread.
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If we're in an async context, schedule the task
-                    asyncio.create_task(self.log_manager.broadcast_log(log_entry))
+                loop = self.log_manager.loop
+                if loop is None or loop.is_closed():
+                    raise RuntimeError("event loop not available")
+                try:
+                    running = asyncio.get_running_loop()
+                except RuntimeError:
+                    running = None
+                if running is loop:
+                    loop.create_task(self.log_manager.broadcast_log(log_entry))
                 else:
-                    # If not in async context, run it directly
-                    loop.run_until_complete(self.log_manager.broadcast_log(log_entry))
+                    asyncio.run_coroutine_threadsafe(self.log_manager.broadcast_log(log_entry), loop)
             except Exception:
                 # Fallback: add to log manager buffer directly
                 self.log_manager.log_buffer.append(log_entry)

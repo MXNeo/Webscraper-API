@@ -1,6 +1,6 @@
 import os
 import json
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from typing import Dict, Optional, Any
 from dotenv import load_dotenv
 
@@ -51,47 +51,86 @@ class Config:
         self.RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
         self.RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
         
-        self.config_file = "config.json"
-        self.key_file = "secret.key"
+        # Config + encryption key live in CONFIG_DIR (default: ./config, /app/config in Docker)
+        # so they end up on the persistent config volume instead of the container filesystem.
+        self.config_dir = os.getenv("CONFIG_DIR", "config")
+        os.makedirs(self.config_dir, exist_ok=True)
+        self.config_file = os.path.join(self.config_dir, "config.json")
+        self.key_file = os.path.join(self.config_dir, "secret.key")
+        self._migrate_legacy_files()
         self._ensure_encryption_key()
         self._load_config()
-    
+
+    def _migrate_legacy_files(self):
+        """Move config.json / secret.key from the working directory (pre-1.4.1 location)."""
+        for legacy, target in (("config.json", self.config_file), ("secret.key", self.key_file)):
+            if os.path.abspath(legacy) == os.path.abspath(target):
+                continue
+            if os.path.exists(legacy) and not os.path.exists(target):
+                try:
+                    os.replace(legacy, target)
+                except OSError:
+                    # Cross-device move or read-only source: copy instead
+                    with open(legacy, 'rb') as src, open(target, 'wb') as dst:
+                        dst.write(src.read())
+
+    @staticmethod
+    def _restrict_permissions(path: str):
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # e.g. Windows / read-only mounts
+
     def _ensure_encryption_key(self):
         """Ensure encryption key exists"""
         if not os.path.exists(self.key_file):
             key = Fernet.generate_key()
             with open(self.key_file, 'wb') as f:
                 f.write(key)
-        
+            self._restrict_permissions(self.key_file)
+
         with open(self.key_file, 'rb') as f:
-            self.key = f.read()
-        
+            self.key = f.read().strip()
+
         self.cipher = Fernet(self.key)
-    
+
     def _load_config(self):
         """Load configuration from file"""
+        self.config = {"scrapegraph": {}, "database": {}}
         if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                self.config = json.load(f)
-        else:
-            # Start with completely empty config - no defaults
-            self.config = {
-                "scrapegraph": {},
-                "database": {}
-            }
-    
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    self.config.update(loaded)
+            except (OSError, ValueError):
+                # Corrupt/unreadable config must not prevent startup
+                import logging
+                logging.getLogger(__name__).error(
+                    f"Could not read {self.config_file} - starting with empty configuration")
+
     def _save_config(self):
-        """Save configuration to file"""
-        with open(self.config_file, 'w') as f:
+        """Save configuration to file (atomic write, owner-only permissions)"""
+        tmp_file = self.config_file + ".tmp"
+        with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=2)
+        self._restrict_permissions(tmp_file)
+        os.replace(tmp_file, self.config_file)
     
     def _encrypt_value(self, value: str) -> str:
         """Encrypt a sensitive value"""
         return self.cipher.encrypt(value.encode()).decode()
     
     def _decrypt_value(self, encrypted_value: str) -> str:
-        """Decrypt a sensitive value"""
-        return self.cipher.decrypt(encrypted_value.encode()).decode()
+        """Decrypt a sensitive value (returns "" if the key does not match, e.g. secret.key was lost)"""
+        try:
+            return self.cipher.decrypt(encrypted_value.encode()).decode()
+        except InvalidToken:
+            import logging
+            logging.getLogger(__name__).error(
+                "Failed to decrypt a stored secret - secret.key does not match config.json. "
+                "Please re-enter the credentials.")
+            return ""
     
     def update_scrapegraph_config(self, 
                                  provider: str,
