@@ -34,6 +34,8 @@ ENV PYTHONUNBUFFERED=1
 ENV UVICORN_WORKERS=1
 ENV MAX_THREAD_POOL_SIZE=10
 ENV PYTHONPATH=/app
+# config.json + secret.key are stored here (persistent volume)
+ENV CONFIG_DIR=/app/config
 
 # Metrics
 ENV METRICS_ENABLED=true

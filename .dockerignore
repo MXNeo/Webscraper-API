@@ -1,0 +1,21 @@
+# Keep secrets, local state and VCS metadata out of the image
+.git
+.gitignore
+.env
+.env.*
+docker/.env
+config.json
+secret.key
+config/
+data/
+logs/
+test/
+**/__pycache__
+**/*.py[cod]
+venv/
+.venv/
+.vscode/
+.idea/
+*.log
+k8s/
+docs/
