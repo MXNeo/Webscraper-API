@@ -35,6 +35,14 @@ class Config:
         self.MIN_PROXY_POOL_SIZE = int(os.getenv("MIN_PROXY_POOL_SIZE", "10"))  # Minimum pool size before refresh
         self.PROXY_REFRESH_INTERVAL = int(os.getenv("PROXY_REFRESH_INTERVAL", "300"))  # Refresh pool every 5 minutes
         self.BATCH_UPDATE_INTERVAL = int(os.getenv("BATCH_UPDATE_INTERVAL", "60"))  # Process batch updates every minute
+
+        # Metrics Settings
+        self.METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() == "true"
+        self.PERSIST_METRICS = os.getenv("PERSIST_METRICS", "true").lower() == "true"
+        self.METRICS_DB_PATH = os.getenv("METRICS_DB_PATH", "data/metrics.db")
+        self.MEMORY_RETENTION_HOURS = int(os.getenv("MEMORY_RETENTION_HOURS", "24"))
+        self.DB_RETENTION_DAYS = int(os.getenv("DB_RETENTION_DAYS", "30"))
+        self.MAX_MEMORY_ENTRIES = int(os.getenv("MAX_MEMORY_ENTRIES", "10000"))
         
         # Request Settings
         self.USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")

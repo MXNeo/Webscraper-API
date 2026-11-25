@@ -121,23 +121,24 @@ config_store = {
     "proxy_enabled": False,
     "last_db_test": None,
     "last_proxy_test": None,
-    "proxy_retry_count": 3,  # Number of proxy retries
-    "request_timeout": 15,   # Reduced timeout
+    # Values come from environment variables (see env.example / README), parsed in config.py
+    "proxy_retry_count": config_instance.PROXY_RETRY_COUNT,
+    "request_timeout": config_instance.REQUEST_TIMEOUT,
     "proxy_rotation_enabled": True,
-    # New proxy pool settings
-    "proxy_pool_size": 50,           # Number of proxies to keep in pool
-    "min_proxy_pool_size": 10,       # Minimum pool size before refresh
-    "proxy_refresh_interval": 300,   # Refresh pool every 5 minutes
-    "batch_update_interval": 60,     # Process batch updates every minute
+    # Proxy pool settings
+    "proxy_pool_size": config_instance.PROXY_POOL_SIZE,
+    "min_proxy_pool_size": config_instance.MIN_PROXY_POOL_SIZE,
+    "proxy_refresh_interval": config_instance.PROXY_REFRESH_INTERVAL,
+    "batch_update_interval": config_instance.BATCH_UPDATE_INTERVAL,
     # Zyte API settings
     "zyte": {"api_key": ZYTE_API_KEY} if ZYTE_API_KEY else None,
     # Metrics settings
-    "metrics_enabled": True,         # Enable metrics collection
-    "persist_metrics": True,         # Persist metrics to SQLite
-    "metrics_db_path": "data/metrics.db",  # Path to metrics database
-    "memory_retention_hours": 24,    # Keep metrics in memory for 24 hours
-    "db_retention_days": 30,         # Keep database metrics for 30 days
-    "max_memory_entries": 10000      # Maximum in-memory metric entries
+    "metrics_enabled": config_instance.METRICS_ENABLED,
+    "persist_metrics": config_instance.PERSIST_METRICS,
+    "metrics_db_path": config_instance.METRICS_DB_PATH,
+    "memory_retention_hours": config_instance.MEMORY_RETENTION_HOURS,
+    "db_retention_days": config_instance.DB_RETENTION_DAYS,
+    "max_memory_entries": config_instance.MAX_MEMORY_ENTRIES,
 }
 
 # Initialize database manager with config instance
