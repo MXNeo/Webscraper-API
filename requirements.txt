@@ -1,5 +1,5 @@
 # Core web framework
-fastapi>=0.104.1
+fastapi>=0.108.0  # TemplateResponse(request, name, ...) signature
 uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
 python-dotenv>=1.0.0
@@ -8,6 +8,7 @@ python-multipart>=0.0.6
 
 # HTTP / scraping
 httpx>=0.25.0
+requests>=2.31.0  # used directly by main.py (was only a transitive dependency)
 newspaper4k>=0.9.3
 lxml[html_clean]>=4.9.0
 news-please>=1.5.35

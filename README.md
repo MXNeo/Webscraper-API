@@ -87,7 +87,7 @@ docker run -d -p 8000:8000 \
 git clone https://github.com/MXNeo/Webscraper-API.git
 cd Webscraper-API
 cp env.example docker/.env
-# Edit docker/.env
+# Edit docker/.env (at least DB_PASSWORD; AUTH_PASSWORD recommended)
 cd docker
 docker-compose up -d
 ```
@@ -289,10 +289,18 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ## 🔒 Security
 
-- API keys are never baked into the image — always pass via environment variables
+- API keys are never baked into the image — always pass via environment variables (`.dockerignore` keeps local `.env`, `config/` and `data/` out of the build)
 - Container runs as non-root (`appuser`)
-- Input validation on all endpoints
-- No sensitive data exposed in error responses
+- **SSRF protection**: URLs resolving to loopback, private, link-local (e.g. cloud metadata `169.254.169.254`) or other non-public addresses are rejected, including redirect targets. Set `ALLOW_PRIVATE_URLS=true` to scrape intranet hosts.
+- **Response size limit**: `MAX_CONTENT_LENGTH` (default 10 MB), `MAX_REDIRECTS` (default 5)
+- **Optional authentication**: set `AUTH_PASSWORD` (and optionally `AUTH_USERNAME`, default `admin`) to protect the web UI, API and WebSocket. Clients authenticate via HTTP Basic, `Authorization: Bearer <password>` or `X-API-Key: <password>`. `/api/health` stays public for health checks. **Recommended whenever the service is reachable by others.**
+- **CORS**: `CORS_ORIGINS` (comma-separated). With the default `*` credentials are not allowed.
+- Stored credentials (`config/config.json`) are encrypted with `config/secret.key`; both live in `CONFIG_DIR` (default `./config`, `/app/config` in Docker) with owner-only permissions. Proxy passwords are never returned by the API.
+
+```bash
+# Example: authenticated request
+curl -u admin:$AUTH_PASSWORD -H 'Content-Type: application/json'   -d '{"url":"https://example.com"}' http://localhost:8000/api/scrape/newspaper
+```
 
 ---
 
@@ -309,6 +317,12 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 **Container won't start**  
 → Check `docker logs <container>`. Common causes: port 8000 in use, insufficient memory.
+
+**`failed to mount local volume ... /config: no such file or directory`**  
+→ Fixed in the current compose files (short-syntax bind mounts are created automatically). On older checkouts run `mkdir -p data config` in the repository root.
+
+**`required variable DB_PASSWORD is missing a value`**  
+→ `docker/docker-compose.yml` needs `DB_PASSWORD` — put it into `docker/.env`.
 
 ---
 
